@@ -6,5 +6,7 @@ python/mahe/mahe_core*.pyd
 checkpoints/
 ui/build/
 ui/.gradle/
+ui/resources/engine/
+build/pyinstaller/
 *.o
 *.obj

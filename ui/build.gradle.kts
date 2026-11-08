@@ -36,6 +36,9 @@ compose.desktop {
             packageName = "MAHE"
             // jpackage/Dmg 要求主版本号 > 0，不能用 0.x
             packageVersion = "1.0.0"
+            // 打进安装包的资源目录：Python 引擎由根目录 build.py --bundle 生成到
+            // ui/resources/engine/，UI 启动时从 compose.application.resources.dir 读取
+            appResourcesRoot = file("resources")
         }
     }
 }

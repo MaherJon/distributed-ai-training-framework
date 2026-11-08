@@ -6,10 +6,13 @@
   2. 汇编内核构建（x86-64 → NASM；其他架构自动回退标量）
   3. C++ 核心静态库 + pybind11 扩展（输出到 python/mahe/mahe_core）
   4. C++ 单元测试构建与运行（--test）
+  5. 集群部署包（--build-cluster）
+  6. 一体化安装包（--bundle：PyInstaller 冻结引擎 + jpackage 打包 UI/JRE）
 
 用法：
   python build.py                 # 构建全部（核心 + 扩展）
   python build.py --test          # 构建并运行 C++ 单测
+  python build.py --bundle        # 生成当前平台的安装包（MSI/DMG/DEB）
   python build.py --compiler g++-13   # 指定编译器（Linux 多 gcc 并存）
   python build.py --clean
 
@@ -18,12 +21,15 @@
             · MSVC（cl，需在 "x64 Native Tools" 命令行中运行）
             · MinGW-w64 / MSYS2（g++，推荐新手）
             汇编用 NASM（-f win64）；未安装 NASM 时自动回退标量内核。
-  macOS  ：ARM 机器跳过汇编（标量路径），无需 NASM。
+  macOS  ：Apple Silicon 用 clang++ 汇编 reduce_neon.S（NEON 加速），Intel 走 NASM；
+            --bundle 仅在 macOS 上才能产出 DMG。
+  Linux  ：x86-64 用 NASM AVX2，aarch64 用 NEON；--bundle 产出 DEB。
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import platform
@@ -370,6 +376,109 @@ def build_cluster(systems: list[tuple[str, str]], master_index: int,
     log(f"集群打包完成（{len(systems)} 台）→ {cluster_dir}")
 
 
+# =========================================================================
+# 一体化安装包：PyInstaller 冻结 Python 引擎 + jpackage 打包 UI 与引擎
+# 说明：PyInstaller 与 jpackage 都只产出「本机平台」的产物，
+#       要得到三平台安装包需分别在 Windows / macOS / Linux 上各跑一次 --bundle。
+# =========================================================================
+
+ENGINE_NAME = "mahe-engine"
+ENGINE_ENTRY = ROOT / "packaging" / "engine_entry.py"
+UI_DIR = ROOT / "ui"
+APP_RES_DIR = UI_DIR / "resources" / "engine"
+PYI_OUT = BUILD / "pyinstaller"
+
+
+def build_engine() -> Path:
+    """把 Python 控制面 + C++ 扩展冻结成 mahe-engine（onedir，启动快）。"""
+    if not ENGINE_ENTRY.exists():
+        sys.exit(f"缺少打包入口：{ENGINE_ENTRY}")
+    if importlib.util.find_spec("PyInstaller") is None:
+        sys.exit("未安装 PyInstaller：\n  python -m pip install pyinstaller")
+
+    shutil.rmtree(PYI_OUT, ignore_errors=True)
+    # 剔除 LD_LIBRARY_PATH：否则 PyInstaller 会把宿主环境里的旧 libstdc++ 打进包，
+    # 与编译扩展时使用的系统库版本不匹配（表现为运行时 ImportError: mahe_core）
+    env = os.environ.copy()
+    env.pop("LD_LIBRARY_PATH", None)
+    run([sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean",
+         "--onedir", "--name", ENGINE_NAME,
+         "--paths", str(ROOT / "python"),
+         "--hidden-import", "mahe.mahe_core",
+         "--collect-submodules", "mahe",
+         "--distpath", str(PYI_OUT),
+         "--workpath", str(PYI_OUT / "work"),
+         "--specpath", str(PYI_OUT),
+         str(ENGINE_ENTRY)], env=env)
+
+    engine_dir = PYI_OUT / ENGINE_NAME
+    exe = engine_dir / (ENGINE_NAME + (".exe" if IS_WIN else ""))
+    if not exe.is_file():
+        sys.exit(f"PyInstaller 未产出引擎可执行文件：{exe}")
+    return engine_dir
+
+
+def install_engine_into_ui(engine_dir: Path) -> None:
+    """把引擎目录复制到 UI 的 appResourcesRoot，供 jpackage 打包。"""
+    if APP_RES_DIR.exists():
+        for p in APP_RES_DIR.iterdir():
+            if p.is_dir():
+                shutil.rmtree(p, ignore_errors=True)
+            else:
+                p.unlink()
+    APP_RES_DIR.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(engine_dir, APP_RES_DIR, dirs_exist_ok=True)
+    log(f"引擎已放入 UI 资源目录：{APP_RES_DIR.relative_to(ROOT)}")
+
+
+def gradle_task() -> str:
+    if IS_WIN:
+        return "packageReleaseMsi"
+    if IS_MAC:
+        return "packageReleaseDmg"
+    return "packageReleaseDeb"
+
+
+def bundle_app(cxx: str, no_asm: bool) -> None:
+    """构建扩展 → 冻结引擎 → 调用 Gradle/jpackage 产出安装包。"""
+    obj_dir = BUILD / "obj"
+    obj_dir.mkdir(parents=True, exist_ok=True)
+    asm_obj = build_asm(cxx, no_asm, obj_dir)
+    objs = build_objects(cxx, obj_dir, extra=[])
+    build_extension(cxx, objs, asm_obj)
+
+    engine_dir = build_engine()
+    install_engine_into_ui(engine_dir)
+
+    gradlew = UI_DIR / ("gradlew.bat" if IS_WIN else "gradlew")
+    if not gradlew.exists():
+        sys.exit(f"未找到 Gradle wrapper：{gradlew}")
+    if not shutil.which("java") and not os.environ.get("JAVA_HOME"):
+        sys.exit("未找到 JDK（jpackage 需要 JDK 17+）：\n"
+                 "  Windows: winget install EclipseAdoptium.Temurin.17.JDK\n"
+                 "  macOS:   brew install --cask temurin@17\n"
+                 "  Linux:   sudo apt install openjdk-17-jdk")
+    if not IS_WIN:
+        try:
+            gradlew.chmod(0o755)
+        except OSError:
+            pass
+    task = gradle_task()
+    log(f"调用 Gradle：{task}（需 JDK 17+，首次会联网下载依赖）")
+    run([str(gradlew), task], cwd=str(UI_DIR))
+
+    pattern = {"msi": "*.msi", "dmg": "*.dmg", "deb": "*.deb"}[
+        "msi" if IS_WIN else ("dmg" if IS_MAC else "deb")]
+    out_dir = UI_DIR / "build" / "compose" / "binaries" / "main" / \
+        ("msi" if IS_WIN else ("dmg" if IS_MAC else "deb"))
+    outs = sorted(out_dir.glob(pattern)) if out_dir.exists() else []
+    if outs:
+        for f in outs:
+            log(f"安装包：{f}")
+    else:
+        log(f"未找到安装包产物，请检查 {out_dir}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="MAHE 构建系统")
     ap.add_argument("--compiler", help="指定 C++ 编译器（如 g++-13）")
@@ -385,12 +494,16 @@ def main() -> None:
                          "如 linux-x86_64,linux-aarch64,mac-arm64,windows-x86_64")
     ap.add_argument("--master-index", type=int, default=0,
                     help="哪台设备作为 master（默认第 0 台）")
+    # 一体化安装包：Python 引擎 + UI + JRE 打成一个安装包
+    ap.add_argument("--bundle", action="store_true",
+                    help="生成当前平台的一体化安装包（MSI/DMG/DEB）")
     args = ap.parse_args()
 
     if args.clean:
         shutil.rmtree(BUILD, ignore_errors=True)
         for f in EXT_OUT.glob("mahe_core*"):
             f.unlink()
+        shutil.rmtree(APP_RES_DIR, ignore_errors=True)
         log("已清理")
         return
 
@@ -408,6 +521,10 @@ def main() -> None:
 
     cxx = find_compiler(args.compiler)
     log(f"平台：{platform.system()} {platform.machine()}，编译器：{cxx}")
+
+    if args.bundle:
+        bundle_app(cxx, args.no_asm)
+        return
 
     asm_obj = build_asm(cxx, args.no_asm, obj_dir)
     objs = build_objects(cxx, obj_dir, extra=[])

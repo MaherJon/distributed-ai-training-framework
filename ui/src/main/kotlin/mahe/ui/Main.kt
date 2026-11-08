@@ -17,22 +17,31 @@ import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 
-fun main() = application {
-    val client = remember { UiClient() }
-    LaunchedEffect(Unit) { client.connect(this) }
+fun main() {
+    Runtime.getRuntime().addShutdownHook(Thread { EngineLauncher.stop() })
+    application {
+        val client = remember { UiClient() }
+        LaunchedEffect(Unit) {
+            EngineLauncher.ensureRunning()
+            client.connect(this)
+        }
 
-    Window(
-        onCloseRequest = ::exitApplication,
-        title = "MAHE // 分布式训练控制终端",
-        state = rememberWindowState(width = 1100.dp, height = 720.dp),
-    ) {
-        var booted by remember { mutableStateOf(false) }
-        androidx.compose.material3.MaterialTheme(colorScheme = MaheTheme.colors) {
-            Box(Modifier.fillMaxSize().background(MaheTheme.bg)) {
-                if (!booted) {
-                    BootSequence(onDone = { booted = true })
-                } else {
-                    MainScreen(client)
+        Window(
+            onCloseRequest = {
+                EngineLauncher.stop()
+                exitApplication()
+            },
+            title = "MAHE // 分布式训练控制终端",
+            state = rememberWindowState(width = 1100.dp, height = 720.dp),
+        ) {
+            var booted by remember { mutableStateOf(false) }
+            androidx.compose.material3.MaterialTheme(colorScheme = MaheTheme.colors) {
+                Box(Modifier.fillMaxSize().background(MaheTheme.bg)) {
+                    if (!booted) {
+                        BootSequence(onDone = { booted = true })
+                    } else {
+                        MainScreen(client)
+                    }
                 }
             }
         }

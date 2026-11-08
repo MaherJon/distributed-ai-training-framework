@@ -103,13 +103,19 @@ def run_demo(args) -> None:
     from pathlib import Path
 
     env = os.environ.copy()
-    # 子进程需要能 import mahe 包
-    pkg_root = str(Path(__file__).resolve().parent.parent)
-    env["PYTHONPATH"] = pkg_root + os.pathsep + env.get("PYTHONPATH", "")
+    # PyInstaller 冻结后 sys.executable 即引擎本身，不能再加 "-m mahe.demo_train"
+    frozen = getattr(sys, "frozen", False)
+    if frozen:
+        base_cmd = [sys.executable]
+    else:
+        base_cmd = [sys.executable, "-m", "mahe.demo_train"]
+        # 源码运行时子进程需要能 import mahe 包
+        pkg_root = str(Path(__file__).resolve().parent.parent)
+        env["PYTHONPATH"] = pkg_root + os.pathsep + env.get("PYTHONPATH", "")
     workers = []
     for i in range(2):
         p = subprocess.Popen(
-            [sys.executable, "-m", "mahe.demo_train", "--role", "worker",
+            [*base_cmd, "--role", "worker",
              "--master", "127.0.0.1", "--name", f"demo-w{i}",
              "--hidden", str(args.hidden)],
             env=env,
@@ -141,7 +147,14 @@ def main() -> None:
     ap.add_argument("--lr", type=float, default=0.5)
     ap.add_argument("--hidden", type=int, default=32)
     ap.add_argument("--min-workers", type=int, default=1)
-    ap.add_argument("--ckpt", default="checkpoints/mahe_ckpt.npz")
+    # 冻结为 GUI 应用时工作目录不可预期（Windows 可能是 C:\Windows\System32），
+    # 默认检查点落到用户目录，避免写系统路径失败
+    if getattr(sys, "frozen", False):
+        default_ckpt = os.path.join(os.path.expanduser("~"), ".mahe",
+                                    "checkpoints", "mahe_ckpt.npz")
+    else:
+        default_ckpt = "checkpoints/mahe_ckpt.npz"
+    ap.add_argument("--ckpt", default=default_ckpt)
     args = ap.parse_args()
 
     if args.ckpt:

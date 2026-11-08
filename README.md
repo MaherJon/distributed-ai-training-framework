@@ -1,293 +1,319 @@
-# MAHE · 分布式 AI 训练框架
+**English** | [简体中文](README.zh-CN.md)
 
-把局域网里的一堆普通电脑（最低 2 核 CPU + 网络）组织成一个训练集群。
-Master 只做参数服务与调度，Worker 用自己的算力分摊数据，适合宿舍/办公室的闲置机器。
+# MAHE · Distributed AI Training Framework
 
-- 设计文档：[DESIGN.md](DESIGN.md)
-- 状态：v0.1，C++ 核心 + AVX2 汇编内核 + Python 参数服务器训练 + Kotlin UI 脚手架
-- 协议：GPLv3
+> Turn idle computers in dorms and offices into an AI training cluster.
 
-## 架构
+**MAHE** organizes ordinary computers on a LAN into a training cluster using a
+parameter-server architecture — no GPU budget required, starting from 2-core CPUs.
+The master only aggregates parameters and schedules work; workers train on local
+shards with their own compute. The core is C++17 with hand-written SIMD assembly,
+Python drives training and orchestration, and Kotlin Compose provides a desktop
+console.
 
-```text
-Kotlin UI 进程 ──(localhost TCP / JSON Lines)── Python 控制面（Master）
-                                                   │ pybind11
-                                              C++ 核心
-                                    ┌──────────┼──────────┐
-                                transport   discovery  scheduler
-                                  TCP         UDP 发现   加权分片/心跳
-                                                   │
-                                   ── TCP 帧协议 ── Worker 进程（Python + C++）
-```
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
+![C++17](https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
+![UI](https://img.shields.io/badge/UI-Kotlin%20Compose-7F52FF?logo=kotlin&logoColor=white)
+![Status](https://img.shields.io/badge/status-v0.1-orange)
 
-训练策略：参数服务器 + **算力加权数据并行** + **本地多步聚合（FedAvg 式）**。
-Worker 在本地分片训练 K 步后只上传参数差值 Δ，Master 按样本数加权合并，
-通信量比"每步传梯度"低 1~2 个数量级。心跳超时节点会被回收，其分片重新派发。
+If this project helps you, a star is appreciated.
 
-## 目录
+---
 
-```text
-core/                C++ 核心
-  include/mahe/      协议、传输、发现、调度、内核头文件
-  src/               protocol/transport/discovery/scheduler/kernel/node 实现
-  asm/reduce_avx2.asm  AVX2 梯度归约与 SGD 更新（NASM）
-  bindings/pybind.cpp  Python 扩展
-  tests/test_core.cpp  C++ 单元测试（含端到端握手）
-python/mahe/         Python 训练核心与演示
-  model.py            NumPy MLP（CPU-only 后端）
-  worker_node.py     Worker：本地多步训练、Δ 回传
-  master_node.py     Master/参数服务器：加权聚合、评估、检查点
-  ui_bridge.py       给 Kotlin UI 的 JSON Lines 控制信道
-  demo_train.py      演示入口（master / worker / 单机 demo）
-ui/                  Kotlin Compose Desktop 界面
-build.py             跨平台构建脚本
-```
+## Contents
 
-## 快速开始（Linux / macOS）
+- [Why MAHE](#why-mahe)
+- [Key features](#key-features)
+- [Quick start](#quick-start)
+- [Architecture](#architecture)
+- [How it works](#how-it-works)
+- [SIMD kernels](#simd-kernels)
+- [Cross-platform builds](#cross-platform-builds)
+- [LAN cluster](#lan-cluster)
+- [Desktop console](#desktop-console)
+- [One-click installers](#one-click-installers)
+- [Project layout](#project-layout)
+- [Testing](#testing)
+- [Roadmap](#roadmap)
+- [Known limitations](#known-limitations)
+- [Contributing](#contributing)
+- [License](#license)
+
+User guide (Chinese): [docs/USER_GUIDE.md](docs/USER_GUIDE.md) · Design doc (Chinese): [DESIGN.md](DESIGN.md)
+
+---
+
+## Why MAHE
+
+- **Start without GPUs.** The hard part of distributed training is usually not
+  FLOPs but the engineering cost of coordinating machines. MAHE needs 2 CPU cores
+  and a LAN — retired office desktops become usable compute.
+- **Friendly to weak networks.** Workers train K local steps and upload only the
+  parameter delta Δ; the master merges deltas weighted by shard size. Communication
+  drops by 1–2 orders of magnitude versus per-step gradient sync.
+- **No platform or compiler lock-in.** One build script covers Windows (MinGW/MSVC),
+  Linux and macOS. x86-64 uses AVX2, Apple Silicon/ARM64 uses NEON, and missing
+  assembler toolchains fall back to scalar code automatically.
+- **Distribute as one installer.** The Python engine, C++ kernels, Kotlin UI and a
+  trimmed JRE are packed into a single MSI/DMG/DEB — end users install no Python,
+  numpy or JDK.
+
+## Key features
+
+| Capability | Description |
+|---|---|
+| Parameter-server training | Master owns global params and optimizer state; workers hold replicas and data shards |
+| Compute-weighted data parallelism | Workers report a micro-benchmark score at join time; shard size ∝ `score / Σscore`, so fast nodes don't wait on slow ones |
+| Local multi-step aggregation | FedAvg-style: K local steps per round, only Δ is uploaded — big communication savings |
+| Auto-discovery and direct connect | Master broadcasts over UDP periodically; use `--master <IP>` across subnets |
+| Fault-tolerant scheduling | Heartbeat watchdog reclaims dead nodes' shards; each round waits for `--min-workers` |
+| SIMD kernels | AVX2 (x86-64) / NEON (aarch64) for delta reduction and SGD update, dispatched at runtime |
+| Checkpoints | `.npz` written at end/interruption, resumable |
+| Observable UI | JSON Lines control channel; UI crash or disconnect never affects training, reconnect resyncs snapshots |
+| One-click packaging | `build.py --bundle` produces MSI / DMG / DEB |
+| Cluster packaging | `--build-cluster` generates master/worker bundles by device count and OS |
+
+## Quick start
+
+Three commands for a single-machine end-to-end demo (1 master + 2 worker subprocesses):
 
 ```bash
-# 依赖
 python3 -m pip install numpy pybind11
-# 汇编内核（x86-64 Linux/macOS 可选装；不装则自动回退标量实现）
-sudo apt install nasm          # Ubuntu/Debian；macOS: brew install nasm
 
-# 构建 + 跑 C++ 单测
-python3 build.py --test
+python3 build.py --test        # build and run C++ tests (kernel/protocol/scheduler/handshake)
+python3 build.py               # build the Python extension
 
-# 构建 Python 扩展
-python3 build.py
-
-# 单机演示：master + 2 个 worker 子进程
 PYTHONPATH=python python3 -m mahe.demo_train --role demo --rounds 20
 ```
 
-预期输出：
+Real terminal output:
 
 ```text
-INFO mahe.master: round=1  workers=2 eval_loss=... eval_acc=...
+INFO mahe.master: round=1  workers=2 eval_loss=0.2816 eval_acc=0.9080
+INFO mahe.master: round=2  workers=2 eval_loss=0.2356 eval_acc=0.9140
 ...
-INFO mahe.master: round=20 workers=2 eval_loss=0.0460 eval_acc=0.9850
 ```
 
-## 在 Windows 上构建
+A checkpoint is written to `checkpoints/mahe_ckpt.npz` (or `~/.mahe/checkpoints/`
+in the packaged app). On Windows, replace `PYTHONPATH=python` with
+`set PYTHONPATH=%CD%\python`; everything else is identical.
 
-需要 **64 位 Python**（3.10+）与 x64 编译器，架构必须一致（x64 Python ↔ x64 编译器）。
+Full dependency, compiler and troubleshooting notes are in the
+[user guide](docs/USER_GUIDE.md) (Chinese).
 
-C++ 编译器二选一：**MinGW-w64（推荐，配置最省事）** 或 **MSVC**。
+## Architecture
 
-### 方案 A：MinGW-w64 / MSYS2（推荐）
+```text
+Kotlin Compose console  (separate process, crash-isolated)
+        │  127.0.0.1:47830 · JSON Lines
+Python control plane — master  (aggregation / eval / checkpoints / UI events)
+        │  pybind11
+C++17 core — transport · discovery · scheduler · kernel
+        │  TCP 47820 · 16-byte frame header (magic MAHE / v1)
+   ┌────┴─────┐
+ Worker A   Worker N   (Python + C++ extension)
+```
 
-1. 安装 Python 3.10+（python.org，勾选 *Add python.exe to PATH*）。
-2. 安装 MSYS2（<https://www.msys2.org>），然后在 **MSYS2 MINGW64** 终端里：
+## How it works
 
-   ```bash
-   pacman -S --needed mingw-w64-x86_64-gcc mingw-w64-x86_64-nasm
-   ```
+1. **Join.** Workers listen for the master's UDP broadcast (47821), then open a TCP
+   connection carrying their compute score and token. The master verifies the token
+   and assigns a `node_id`.
+2. **Shard.** The scheduler splits this round's data into weighted shards by compute
+   score and dispatches them to workers.
+3. **Local training.** Each worker runs K steps (`--k-steps`) on its shard and computes
+   only the parameter delta Δ.
+4. **Aggregate.** The master averages Δ weighted by shard sample counts and applies the
+   global update with a SIMD kernel.
+5. **Recover.** Nodes whose heartbeat times out are marked dead; their shards return to
+   the pending pool for the next round.
 
-3. 把 MSYS2 的编译器目录加进 PATH（在 Windows 的 **cmd** 或 **PowerShell** 里操作，
-   不要用 MSYS2 的终端，避免路径转换问题）：
+Communication per round (same model, same round):
 
-   ```bat
-   :: cmd
-   set PATH=C:\msys64\mingw64\bin;%PATH%
-   g++ --version
-   nasm -version
-   ```
-
-   ```powershell
-   # PowerShell
-   $env:PATH = "C:\msys64\mingw64\bin;$env:PATH"
-   ```
-
-4. 安装 Python 依赖并构建：
-
-   ```bat
-   python -m pip install numpy pybind11
-   python build.py --test
-   python build.py
-   ```
-
-### 方案 B：MSVC
-
-1. 安装 **Build Tools for Visual Studio 2022**，勾选 *使用 C++ 的桌面开发*
-   （含 MSVC v143 与 Windows SDK）。
-2. 安装 NASM 并加入 PATH：
-
-   ```powershell
-   winget install nasm
-   # 或 choco install nasm
-   ```
-
-3. 安装 64 位 Python 3.10+（勾选 *Add python.exe to PATH*），然后：
-
-   ```bat
-   python -m pip install numpy pybind11
-   ```
-
-4. **必须从 "x64 Native Tools Command Prompt for VS 2022" 启动**（或先执行
-   `vcvars64.bat`），否则找不到 `cl.exe`：
-
-   ```bat
-   cd /d D:\path\to\MAHE-distributed-ai-training-framework
-   python build.py --test
-   python build.py
-   ```
-
-   如果 `cl` 已被误判或需要显式指定：
-
-   ```bat
-   python build.py --compiler cl
-   ```
-
-构建产物：`python\mahe\mahe_core.cp3XX-win_amd64.pyd`。
-
-### Windows 注意事项
-
-- **没有 NASM**：`python build.py` 会打印警告并自动回退标量内核（功能完整、速度略低），
-  也可显式 `--no-asm`。装了 NASM 才能启用 AVX2 汇编路径。
-- **防火墙**：Master 监听 TCP `47820` 与 UDP `47821`，首次运行请允许
-  "*专用网络*" 访问，否则 Worker 无法入网。
-- 若 `python build.py --test` 报链接错误，通常是 Python 位数与编译器不一致
-  （32 位 Python + x64 编译器）。`python -c "import struct;print(struct.calcsize('P')*8)"`
-  应输出 `64`。
-- 本仓库的 `/tmp`、`apt`、`brew` 等命令仅适用于 Linux/macOS；Windows 请使用上面对应的
-  `winget` / `choco` / `pacman`。
-
-### Windows 常见报错
-
-| 报错 | 原因 | 处理 |
+| Strategy | Upload per round | Relative traffic |
 |---|---|---|
-| `undefined reference to '__imp_WSAStartup'` 等 | MinGW 忽略 MSVC 的 `#pragma comment(lib)` | 已由 `build.py` 自动加 `-lws2_32`；请用仓库最新脚本重新构建 |
-| `cannot find -lpython312` / 无法解析 PyInit | 找不到 Python 导入库 | 确认装的是 64 位 Python，且 `python -c "import sys;print(sys.base_prefix)"` 下存在 `libs\python312.lib` |
-| `'cl' 不是内部或外部命令` | 没在 VS x64 开发终端里 | 打开 *x64 Native Tools Command Prompt for VS 2022*，或先执行 `vcvars64.bat` |
-| 链接期 `file in wrong format` | 32 位 Python 配 x64 编译器（或反之） | 统一为 64 位 |
-| Worker 一直连不上 Master | 防火墙拦截 / 不同网段广播 | 放行 TCP 47820 + UDP 47821，或给 Worker 加 `--master <IP>` |
+| Per-step gradient sync | K × params | baseline |
+| Local K steps + Δ (MAHE) | 1 × params | ~1/K |
 
-### 运行演示（Windows）
+## SIMD kernels
 
-```bat
-set PYTHONPATH=%CD%\python
-python -m mahe.demo_train --role demo --rounds 20
-```
-
-PowerShell：
-
-```powershell
-$env:PYTHONPATH="$PWD\python"
-python -m mahe.demo_train --role demo --rounds 20
-```
-
-## 局域网多机训练
-
-在 Master 机器：
-
-```bash
-PYTHONPATH=python python -m mahe.demo_train --role master --min-workers 2 --rounds 30
-```
-
-在每台 Worker 机器（同网段，UDP 广播可发现 Master）：
-
-```bash
-PYTHONPATH=python python -m mahe.demo_train --role worker
-```
-
-自动发现失败（跨网段 / 广播被拦）时直连：
-
-```bash
-PYTHONPATH=python python -m mahe.demo_train --role worker --master 192.168.1.10
-```
-
-说明：演示脚本内置集群令牌 `mahe-demo-token`；真实使用请在
-[demo_train.py](python/mahe/demo_train.py) 或你自己的入口中修改，令牌不匹配的连接会被拒绝。
-
-## 常用参数
-
-| 参数 | 默认 | 说明 |
+| Kernel | Platform | Implementation |
 |---|---|---|
-| `--role` | `demo` | `master` / `worker` / `demo` |
-| `--rounds` | 20 | 通信轮数 |
-| `--k-steps` | 20 | 每轮 Worker 本地训练步数 |
-| `--batch` | 64 | 本地 batch |
-| `--lr` | 0.5 | 学习率 |
-| `--hidden` | 32 | 隐藏层宽度 |
-| `--min-workers` | 1 | Master 等待的最少节点数 |
-| `--ckpt` | `checkpoints/mahe_ckpt.npz` | 检查点路径 |
+| `mahe_reduce_add_f32` | x86-64 | NASM / AVX2, 8×f32 per instruction |
+| `mahe_reduce_add_f32` | aarch64 | GAS / NEON, 16×f32 per iteration (4×q registers) |
+| `mahe_sgd_update_f32` | x86-64 | AVX2 FMA |
+| `mahe_sgd_update_f32` | aarch64 | `dup + fneg + fmla` for `param -= lr*grad` |
+| all | any | scalar C++ fallback, element-wise identical |
 
-端口：TCP `47820`（训练/心跳），UDP `47821`（发现广播），TCP `47830`（UI 控制信道）。
-
-## 构建脚本
+Dispatch is automatic:
 
 ```bash
-python build.py                     # 核心 + Python 扩展
-python build.py --test              # 构建并运行 C++ 单测
-python build.py --no-asm            # 强制标量内核
-python build.py --no-ext            # 只构建核心与单测
-python build.py --compiler g++-13   # 指定编译器
-python build.py --clean             # 清理产物
+python -c "import mahe; print(mahe.mahe_core.kernel_impl())"
 ```
 
-`build.py` 会自动探测：OS/架构、编译器（`CXX` 环境变量优先）、NASM、Python 头文件、
-pybind11；缺依赖时给出安装提示，不会静默改动你的环境。
+prints `avx2`, `neon` or `scalar`. Use `--no-asm` to force the scalar path.
 
-## 测试
+## Cross-platform builds
 
-- `python build.py --test`：内核与标量实现逐元素比对、帧编解码、加权分片、
-  Master/Worker 握手、令牌拒绝、双向消息。
-- 端到端：`--role demo` 会真实起 2 个 Worker 子进程，检查点落在 `checkpoints/`。
+| Platform | Compiler | Assembly | Artifact |
+|---|---|---|---|
+| Windows x64 | MinGW-w64 (recommended) / MSVC | NASM `-f win64` | `mahe_core.cp3XX-win_amd64.pyd` |
+| Linux x86-64 | g++ / clang++ | NASM `-f elf64` | `mahe_core.cpython-3XX-x86_64-linux-gnu.so` |
+| Linux aarch64 | g++ / clang++ | NEON (assembled `.S`) | `mahe_core.cpython-3XX-aarch64-linux-gnu.so` |
+| macOS Apple Silicon | clang++ | NEON (assembled `.S`) | `mahe_core.cpython-3XX-darwin.so` |
+| macOS Intel | clang++ | NASM | same |
 
-## UI（Kotlin Compose Desktop）
-
-UI 是独立进程：训练照常在 Python 侧跑，UI 通过 `127.0.0.1:47830` 订阅事件，
-断开或崩溃都不影响训练，重连后自动补发快照。
-
-只需要 **JDK 17+**，Gradle 由仓库自带的 wrapper 下载：
-
-Windows（PowerShell）：
-
-```powershell
-winget install EclipseAdoptium.Temurin.17.JDK   # 或已装 JDK 可跳过
-cd D:\MAHE-distributed-ai-training-framework\ui
-.\gradlew.bat run
+```bash
+python build.py                     # core + Python extension
+python build.py --test              # build and run C++ tests
+python build.py --bundle            # one-click installer (engine + UI + JRE)
+python build.py --no-asm            # force scalar kernels
+python build.py --compiler g++-13   # pick a compiler
+python build.py --clean             # remove artifacts
 ```
 
-Linux / macOS：
+On Windows, keep Python and the compiler both 64-bit. MinGW setup is described in the
+[user guide · Windows](docs/USER_GUIDE.md#windows).
+
+## LAN cluster
+
+Master (listens on TCP 47820 / UDP 47821):
+
+```bash
+PYTHONPATH=python python3 -m mahe.demo_train --role master --min-workers 2 --rounds 30
+```
+
+Worker (same subnet, discovered via UDP broadcast):
+
+```bash
+PYTHONPATH=python python3 -m mahe.demo_train --role worker
+```
+
+Across subnets, or when broadcast is blocked:
+
+```bash
+PYTHONPATH=python python3 -m mahe.demo_train --role worker --master 192.168.1.10
+```
+
+> The demo token `mahe-demo-token` is hardcoded in
+> [demo_train.py](python/mahe/demo_train.py). Replace it for any real deployment;
+> connections with a wrong token are rejected.
+
+Generate deployment bundles by device count and OS:
+
+```bash
+python3 build.py --build-cluster \
+  --systems "linux-x86_64,linux-aarch64,windows-x86_64,mac-arm64" \
+  --master-index 0
+```
+
+Output lands in `build/cluster/device_XX_<role>_<os>-<arch>/`, each containing sources,
+build scripts, launch scripts and `device_info.json`. Devices matching the build host
+get a prebuilt extension; others build on first launch on the target machine.
+
+## Desktop console
+
+A standalone Kotlin Compose Desktop process subscribing to events on `127.0.0.1:47830`:
 
 ```bash
 cd ui
-./gradlew run
+./gradlew run          # Windows: .\gradlew.bat run
 ```
 
-首次运行会下载 Gradle 8.5 与 Compose 依赖（需联网，约数百 MB），之后可离线运行。
-仓库已在 [settings.gradle.kts](ui/settings.gradle.kts) / [build.gradle.kts](ui/build.gradle.kts)
-预置阿里云 Maven 镜像（官方仓库作为兜底），国内网络更稳；不需要可删掉对应 `maven(...)` 行。
+Start training first (`demo` or `master` opens 47830), then the UI. The console shows a
+boot self-check sequence, the node table, loss/acc curves and the event log; the
+`◉ LINKED` / `◌ OFFLINE` indicator in the top-right shows connection state.
 
-**先启动训练，UI 才有数据**：
+## One-click installers
 
-```powershell
-# 终端 1：训练（demo 或 master 均可，都会开启 47830）
-$env:PYTHONPATH="D:\MAHE-distributed-ai-training-framework\python"
-python -m mahe.demo_train --role demo --rounds 20
-# 终端 2：UI
-cd D:\MAHE-distributed-ai-training-framework\ui
-.\gradlew.bat run
+Pack the Python engine, C++/NEON kernels, Kotlin UI and a trimmed JRE into one installer:
+
+```bash
+python -m pip install pyinstaller   # plus JDK 17+
+python build.py --bundle
 ```
 
-界面内容：启动自检序列 → 集群节点表（节点数/算力分/存活）→ loss/acc 双折线 →
-事件日志。右上角 `◉ LINKED` 表示已连上控制面，`◌ OFFLINE` 表示未运行 Master，会自动重连。
+| Platform | Artifact | Path |
+|---|---|---|
+| Windows | MSI | `ui/build/compose/binaries/main/msi/MAHE-1.0.0.msi` |
+| macOS | DMG | `ui/build/compose/binaries/main/dmg/MAHE-1.0.0.dmg` |
+| Linux | DEB | `ui/build/compose/binaries/main/deb/*.deb` |
 
-可选：打包成安装包。
+After installation, just launch the icon: when port 47830 is not listening, the UI
+spawns the bundled `mahe-engine` (default `--role demo`; override with
+`MAHE_ENGINE_ROLE=master|worker`).
 
-```powershell
-cd ui
-.\gradlew.bat packageReleaseMsi    # Windows 安装包（也可 packageReleaseDeb / Dmg）
-.\gradlew.bat runDistributable     # 免安装可执行目录
+PyInstaller and jpackage only produce artifacts for the host platform, so build each
+target on its own OS. Size is roughly 100–130 MB. Public macOS distribution additionally
+requires signing and notarization.
+
+## Project layout
+
+```text
+core/
+  include/mahe/         protocol, transport, discovery, scheduler, kernel headers
+  src/                  protocol / transport / discovery / scheduler / kernel / node
+  asm/reduce_avx2.asm   AVX2 delta reduction and SGD update (NASM, x86-64)
+  asm/reduce_neon.S     NEON delta reduction and SGD update (GAS, aarch64)
+  bindings/pybind.cpp   Python extension (zero-copy NumPy buffers)
+  tests/test_core.cpp   C++ unit tests (including end-to-end handshake)
+python/mahe/
+  model.py              NumPy MLP (CPU-only reference backend)
+  worker_node.py        local multi-step training, Δ upload
+  master_node.py        parameter server: weighted aggregation, eval, checkpoints
+  ui_bridge.py          JSON Lines control channel
+  demo_train.py         demo / master / worker entry point
+ui/                     Kotlin Compose Desktop console
+packaging/              PyInstaller entry point
+docs/USER_GUIDE.md      user guide (Chinese)
+build.py                cross-platform build / test / cluster bundling / installer
 ```
 
-## 当前边界
+## Testing
 
-- 训练后端是 NumPy MLP（CPU），尚未接 PyTorch；
-- 梯度压缩（int8）已在设计中预留，尚未实现；
-- 多机验证限于本机多进程，真实局域网需按上面步骤自行组网；
-- UI 目前是可用脚手架（启动序列 + 三块面板），交互（建集群/起停训练按钮）尚未接控制指令。
+```bash
+python build.py --test
+```
 
-路线图见 [DESIGN.md](DESIGN.md) §12。
+Coverage:
+
+- SIMD kernels vs scalar implementation, element-wise comparison (1e-6 tolerance)
+- Frame codec: length, magic, header parsing
+- Weighted sharding 3:1 → 750/250
+- Task dispatch, completion, node removal
+- Master/worker handshake, token rejection, bidirectional messages, graceful shutdown
+
+End-to-end: `--role demo` really spawns 2 worker subprocesses and writes a checkpoint.
+
+## Roadmap
+
+- **v0.1 (current)**: C++ core + AVX2/NEON kernels + Python parameter-server training +
+  local demo + UI scaffold
+- **v0.2**: real multi-machine LAN validation, checkpoint resume, int8 gradient compression
+- **v0.3**: PyTorch backend, full three-view UI and control commands
+- **v0.4**: TLS, web monitoring endpoint
+
+## Known limitations
+
+- The training backend is a NumPy MLP (CPU); PyTorch is not wired up yet.
+- int8 gradient compression is designed but not implemented.
+- Multi-machine validation is mostly local multi-process; real LAN deployment follows the guide.
+- The UI is a working console scaffold; create-cluster / start-stop interactions are not
+  wired to control commands yet.
+
+## Contributing
+
+Issues and PRs are welcome. Before submitting:
+
+1. Make `python build.py --test` pass.
+2. Keep the C++ and Python sides in sync; new kernels must ship with a scalar fallback.
+3. For assembly changes, test on the target architecture and state the `kernel_impl()`
+   output in the PR description.
+
+If this project helps you, a star is the best support.
+
+## License
+
+[GPL-3.0](LICENSE) · compatible with pybind11 (BSD) and NASM (BSD-2).
