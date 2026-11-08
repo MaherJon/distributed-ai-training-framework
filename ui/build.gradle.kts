@@ -37,8 +37,9 @@ compose.desktop {
             // jpackage/Dmg 要求主版本号 > 0，不能用 0.x
             packageVersion = "1.0.0"
             // 打进安装包的资源目录：Python 引擎由根目录 build.py --bundle 生成到
-            // ui/resources/engine/，UI 启动时从 compose.application.resources.dir 读取
-            appResourcesRoot = file("resources")
+            // ui/resources/engine/，UI 启动时从 compose.application.resources.dir 读取。
+            // 只打包 ui/resources/windows / windows-x64 下的内容，避免跨平台引擎混装。
+            appResourcesRootDir.set(project.layout.projectDirectory.dir("resources"))
         }
     }
 }

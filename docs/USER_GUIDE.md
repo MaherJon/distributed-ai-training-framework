@@ -276,7 +276,7 @@ python build.py --bundle
 | macOS | `ui/build/compose/binaries/main/dmg/MAHE-1.0.0.dmg` |
 | Linux | `ui/build/compose/binaries/main/deb/*.deb` |
 
-流程：编译扩展 → PyInstaller 冻结 `mahe-engine` → 复制到 `ui/resources/engine/`
+流程：编译扩展 → PyInstaller 冻结 `mahe-engine` → 复制到 `ui/resources/<os>-<arch>/engine/`（Compose 插件只打包 `<os>` / `<os>-<arch>` 子目录）
 → Gradle jpackage 把 UI、JRE、引擎一起封装。体积约 100–130 MB。
 
 ## 9. 命令行参考

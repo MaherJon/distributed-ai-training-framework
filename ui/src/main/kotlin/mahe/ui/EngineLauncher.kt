@@ -59,8 +59,17 @@ object EngineLauncher {
             val f = root.resolve("engine").resolve(name)
             if (f.isFile) return f
         }
-        // 开发模式回退：ui/resources/engine
-        val dev = File("resources/engine").resolve(name)
+        // 开发模式回退：build.py --bundle 把引擎放在
+        // ui/resources/<os>-<arch>/engine（Compose 只打包 <os>/<os>-<arch> 子目录）
+        val osName = System.getProperty("os.name").lowercase()
+        val osDir = when {
+            osName.contains("win") -> "windows"
+            osName.contains("mac") -> "macos"
+            else -> "linux"
+        }
+        val archDir = System.getProperty("os.arch").lowercase()
+            .let { if (it == "aarch64" || it == "arm64") "arm64" else "x64" }
+        val dev = File("resources/$osDir-$archDir/engine").resolve(name)
         return dev.takeIf { it.isFile }
     }
 

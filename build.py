@@ -388,7 +388,17 @@ def build_cluster(systems: list[tuple[str, str]], master_index: int,
 ENGINE_NAME = "mahe-engine"
 ENGINE_ENTRY = ROOT / "packaging" / "engine_entry.py"
 UI_DIR = ROOT / "ui"
-APP_RES_DIR = UI_DIR / "resources" / "engine"
+
+
+def compose_res_subdir() -> str:
+    """Compose 插件只打包 resources/common、resources/<os>、resources/<os>-<arch>
+    三个子目录，引擎必须放进按主机 OS/架构命名的子目录。"""
+    os_name = "windows" if IS_WIN else ("macos" if IS_MAC else "linux")
+    arch = "arm64" if IS_AARCH64 else "x64"
+    return f"{os_name}-{arch}"
+
+
+APP_RES_DIR = UI_DIR / "resources" / compose_res_subdir() / "engine"
 PYI_OUT = BUILD / "pyinstaller"
 
 
@@ -422,7 +432,8 @@ def build_engine() -> Path:
 
 
 def install_engine_into_ui(engine_dir: Path) -> None:
-    """把引擎目录复制到 UI 的 appResourcesRoot，供 jpackage 打包。"""
+    """把引擎目录复制到 UI 的 appResourcesRootDir 下的 <os>-<arch>/engine，
+    供 jpackage 按平台打包。"""
     if APP_RES_DIR.exists():
         for p in APP_RES_DIR.iterdir():
             if p.is_dir():
