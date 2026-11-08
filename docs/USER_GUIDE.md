@@ -335,6 +335,8 @@ python build.py --bundle
 | UI 一直 `OFFLINE` | 训练未启动，或角色是 `worker` | 启动 `demo`/`master`；确认 47830 未被占用 |
 | `--bundle` 提示缺 JDK | 未安装 JDK 17+ | `winget install EclipseAdoptium.Temurin.17.JDK` 等 |
 | `--bundle` 提示缺 PyInstaller | 未安装 | `python -m pip install pyinstaller` |
+| `:proguardReleaseJars` 报 800+ unresolved references | `packageReleaseMsi` 会跑 ProGuard，Compose/Swing 反射引用无法静态解析 | 用最新 `build.py`（已改用 `packageMsi`，跳过 ProGuard） |
+| `:downloadWix` 连接 github.com 超时 | WiX 工具集从 GitHub Releases 下载 | 手动下载 [wix311-binaries.zip](https://github.com/wixtoolset/wix3/releases/download/wix3112rtm/wix311-binaries.zip)（可用 ghproxy 镜像），解压后设 `$env:WIX` 指向解压目录（其下应有 `bin\candle.exe`），并先执行 `.\gradlew.bat --stop` 让守护进程重读环境变量 |
 | macOS 打开应用提示“已损坏” | 未签名/未公证 | 右键“打开”，或 `xattr -dr com.apple.quarantine /Applications/MAHE.app` |
 | Linux 打 DEB 失败 | 缺 `dpkg-deb` | `sudo apt install dpkg-dev`（或 `dpkg`） |
 

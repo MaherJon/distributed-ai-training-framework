@@ -446,11 +446,14 @@ def install_engine_into_ui(engine_dir: Path) -> None:
 
 
 def gradle_task() -> str:
+    # 用非 release 任务：packageReleaseMsi 会先跑 ProGuard，
+    # 而 Compose/Swing 有大量反射引用会导致 ProGuard 报 800+ unresolved
+    # references 直接失败；本应用无需混淆裁剪。
     if IS_WIN:
-        return "packageReleaseMsi"
+        return "packageMsi"
     if IS_MAC:
-        return "packageReleaseDmg"
-    return "packageReleaseDeb"
+        return "packageDmg"
+    return "packageDeb"
 
 
 def bundle_app(cxx: str, no_asm: bool) -> None:
