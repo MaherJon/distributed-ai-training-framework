@@ -330,6 +330,7 @@ python build.py --bundle
 | Windows `cannot find -lpython3XX` | 找不到 Python 导入库 | 确认 64 位 Python，且 `sys.base_prefix\libs\python3XX.lib` 存在 |
 | Windows `'cl' 不是内部或外部命令` | 没在 VS x64 开发终端 | 打开 *x64 Native Tools Command Prompt*，或先跑 `vcvars64.bat` |
 | 链接期 `file in wrong format` | 32 位 Python 配 64 位编译器（或反之） | 统一 64 位：`python -c "import struct;print(struct.calcsize('P')*8)"` 应为 `64` |
+| `DLL load failed while importing mahe_core: 找不到指定的模块` | MinGW 保留了动态依赖 `libwinpthread-1.dll`；Python 3.8+ 加载扩展不搜索 PATH | 用最新 `build.py`（已加 `-static` 全静态链接）`--clean` 重建；或把 `C:\msys64\mingw64\bin\libwinpthread-1.dll` 复制到 `python\mahe\`；建议改用 UCRT64 工具链或 MSVC |
 | Worker 一直连不上 Master | 防火墙 / 跨网段广播被拦 | 放行 TCP 47820 + UDP 47821，或 `--master <IP>` |
 | UI 一直 `OFFLINE` | 训练未启动，或角色是 `worker` | 启动 `demo`/`master`；确认 47830 未被占用 |
 | `--bundle` 提示缺 JDK | 未安装 JDK 17+ | `winget install EclipseAdoptium.Temurin.17.JDK` 等 |

@@ -209,7 +209,10 @@ def build_extension(cxx: str, objs: list[Path], asm_obj: Path | None) -> Path:
         if IS_MAC:
             link += ["-undefined", "dynamic_lookup"]
         elif IS_WIN:
-            link += ["-static-libgcc", "-static-libstdc++"]
+            # -static 让 libgcc / libstdc++ / winpthread 全部静态链接。
+            # 注意：Python 3.8+ 加载扩展时不搜索 PATH，若动态依赖 libwinpthread-1.dll
+            # 会报 "DLL load failed ... 找不到指定的模块"。
+            link += ["-static-libgcc", "-static-libstdc++", "-static"]
             link += python_link_flags(cxx)
             link += win_system_libs(cxx)
         else:

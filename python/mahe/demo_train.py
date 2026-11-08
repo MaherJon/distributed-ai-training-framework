@@ -26,7 +26,9 @@ UDP_PORT = 47821
 
 def _need_core():
     if not mahe.HAS_CORE:
-        sys.exit("错误：mahe_core 扩展未构建。请先运行 python build.py")
+        sys.exit(f"错误：mahe_core 扩展无法加载：{mahe.CORE_ERROR}\n"
+                 "请先运行 python build.py；Windows 上若提示 DLL load failed，"
+                 "见 docs/USER_GUIDE.md 的排错表")
 
 
 def run_master(args) -> None:
