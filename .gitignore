@@ -1,0 +1,10 @@
+build/
+__pycache__/
+*.pyc
+python/mahe/mahe_core*.so
+python/mahe/mahe_core*.pyd
+checkpoints/
+ui/build/
+ui/.gradle/
+*.o
+*.obj
