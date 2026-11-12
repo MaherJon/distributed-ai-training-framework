@@ -7,12 +7,12 @@
   3. C++ 核心静态库 + pybind11 扩展（输出到 python/mahe/mahe_core）
   4. C++ 单元测试构建与运行（--test）
   5. 集群部署包（--build-cluster）
-  6. 一体化安装包（--bundle：PyInstaller 冻结引擎 + jpackage 打包 UI/JRE）
+  6. 一体化安装包（--bundle：PyInstaller 冻结引擎 + 生成自带桌面快捷方式的安装器）
 
 用法：
   python build.py                 # 构建全部（核心 + 扩展）
   python build.py --test          # 构建并运行 C++ 单测
-  python build.py --bundle        # 生成当前平台的安装包（MSI/DMG/DEB）
+  python build.py --bundle        # 生成当前平台的安装器
   python build.py --compiler g++-13   # 指定编译器（Linux 多 gcc 并存）
   python build.py --clean
 
@@ -21,9 +21,12 @@
             · MSVC（cl，需在 "x64 Native Tools" 命令行中运行）
             · MinGW-w64 / MSYS2（g++，推荐新手）
             汇编用 NASM（-f win64）；未安装 NASM 时自动回退标量内核。
-  macOS  ：Apple Silicon 用 clang++ 汇编 reduce_neon.S（NEON 加速），Intel 走 NASM；
-            --bundle 仅在 macOS 上才能产出 DMG。
-  Linux  ：x86-64 用 NASM AVX2，aarch64 用 NEON；--bundle 产出 DEB。
+  macOS  ：Apple Silicon 用 clang++ 汇编 reduce_neon.S（NEON 加速），Intel 走 NASM。
+  Linux  ：x86-64 用 NASM AVX2，aarch64 用 NEON。
+
+  --bundle 现在不再依赖 JDK / jpackage / WiX：
+  先把 Python 引擎冻结为 onedir，再用 PyInstaller 打成单文件安装器；
+  安装器负责复制文件并创建桌面（及开始菜单）快捷方式。
 """
 
 from __future__ import annotations
@@ -179,6 +182,18 @@ def win_system_libs(cxx: str) -> list[str]:
     return ["-lws2_32"]
 
 
+def asm_defines(cxx: str, asm_obj: Path | None) -> list[str]:
+    """成功汇编出 AVX2 目标文件时才定义 MAHE_HAS_AVX2_ASM。
+
+    kernel.cpp 依据该宏决定是否引用汇编符号；缺 NASM / --no-asm 时走标量回退，
+    避免链接期出现 undefined reference。
+    """
+    if asm_obj is None or not IS_X86_64:
+        return []
+    name = "MAHE_HAS_AVX2_ASM"
+    return [f"/D{name}" if is_msvc(cxx) else f"-D{name}"]
+
+
 def build_objects(cxx: str, obj_dir: Path, extra: list[str]) -> list[Path]:
     objs = []
     for src in CORE_SOURCES:
@@ -331,7 +346,7 @@ def build_cluster(systems: list[tuple[str, str]], master_index: int,
         obj_dir = BUILD / "obj"
         obj_dir.mkdir(parents=True, exist_ok=True)
         asm = build_asm(cxx, no_asm, obj_dir)
-        objs = build_objects(cxx, obj_dir, [])
+        objs = build_objects(cxx, obj_dir, asm_defines(cxx, asm))
         host_ext_path = build_extension(cxx, objs, asm)
 
     for i, (osname, arch) in enumerate(systems):
@@ -380,32 +395,27 @@ def build_cluster(systems: list[tuple[str, str]], master_index: int,
 
 
 # =========================================================================
-# 一体化安装包：PyInstaller 冻结 Python 引擎 + jpackage 打包 UI 与引擎
-# 说明：PyInstaller 与 jpackage 都只产出「本机平台」的产物，
-#       要得到三平台安装包需分别在 Windows / macOS / Linux 上各跑一次 --bundle。
+# 一体化安装器：PyInstaller 冻结 Python 引擎 → 生成自带桌面快捷方式的安装器
+# 说明：PyInstaller 只产出「本机平台」的产物，
+#       要得到三平台安装器需分别在 Windows / macOS / Linux 上各跑一次 --bundle。
+#       安装器不再依赖 JDK / jpackage / WiX / Inno Setup。
 # =========================================================================
 
 ENGINE_NAME = "mahe-engine"
 ENGINE_ENTRY = ROOT / "packaging" / "engine_entry.py"
-UI_DIR = ROOT / "ui"
-
-
-def compose_res_subdir() -> str:
-    """Compose 插件只打包 resources/common、resources/<os>、resources/<os>-<arch>
-    三个子目录，引擎必须放进按主机 OS/架构命名的子目录。"""
-    os_name = "windows" if IS_WIN else ("macos" if IS_MAC else "linux")
-    arch = "arm64" if IS_AARCH64 else "x64"
-    return f"{os_name}-{arch}"
-
-
-APP_RES_DIR = UI_DIR / "resources" / compose_res_subdir() / "engine"
+INSTALLER_ENTRY = ROOT / "packaging" / "installer_entry.py"
 PYI_OUT = BUILD / "pyinstaller"
+INSTALLER_OUT = BUILD / "installer"
+APP_DIR = BUILD / "app" / "MAHE"
 
 
 def build_engine() -> Path:
-    """把 Python 控制面 + C++ 扩展冻结成 mahe-engine（onedir，启动快）。"""
+    """把 Python 控制面 + C++ 扩展 + Web UI 冻结成 mahe-engine（onedir，启动快）。"""
     if not ENGINE_ENTRY.exists():
         sys.exit(f"缺少打包入口：{ENGINE_ENTRY}")
+    webui = EXT_OUT / "webui"
+    if not (webui / "index.html").is_file():
+        sys.exit(f"缺少 Web UI 资源：{webui}")
     if importlib.util.find_spec("PyInstaller") is None:
         sys.exit("未安装 PyInstaller：\n  python -m pip install pyinstaller")
 
@@ -419,6 +429,7 @@ def build_engine() -> Path:
          "--paths", str(ROOT / "python"),
          "--hidden-import", "mahe.mahe_core",
          "--collect-submodules", "mahe",
+         "--add-data", f"{webui}{os.pathsep}mahe/webui",
          "--distpath", str(PYI_OUT),
          "--workpath", str(PYI_OUT / "work"),
          "--specpath", str(PYI_OUT),
@@ -431,69 +442,58 @@ def build_engine() -> Path:
     return engine_dir
 
 
-def install_engine_into_ui(engine_dir: Path) -> None:
-    """把引擎目录复制到 UI 的 appResourcesRootDir 下的 <os>-<arch>/engine，
-    供 jpackage 按平台打包。"""
-    if APP_RES_DIR.exists():
-        for p in APP_RES_DIR.iterdir():
-            if p.is_dir():
-                shutil.rmtree(p, ignore_errors=True)
-            else:
-                p.unlink()
-    APP_RES_DIR.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(engine_dir, APP_RES_DIR, dirs_exist_ok=True)
-    log(f"引擎已放入 UI 资源目录：{APP_RES_DIR.relative_to(ROOT)}")
+def assemble_app(engine_dir: Path) -> Path:
+    """组装安装器载荷：build/app/MAHE/mahe-engine/..."""
+    shutil.rmtree(APP_DIR, ignore_errors=True)
+    APP_DIR.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(engine_dir, APP_DIR / ENGINE_NAME)
+    (APP_DIR / "README.txt").write_text(
+        "MAHE 分布式 AI 训练终端\n"
+        "启动：mahe-engine/mahe-engine（Windows 为 mahe-engine.exe）\n"
+        "默认以 demo 角色运行并自动打开浏览器；\n"
+        "可用环境变量 MAHE_ENGINE_ROLE=master|worker 切换角色。\n",
+        encoding="utf-8",
+    )
+    log(f"安装载荷：{APP_DIR.relative_to(ROOT)}")
+    return APP_DIR
 
 
-def gradle_task() -> str:
-    # 用非 release 任务：packageReleaseMsi 会先跑 ProGuard，
-    # 而 Compose/Swing 有大量反射引用会导致 ProGuard 报 800+ unresolved
-    # references 直接失败；本应用无需混淆裁剪。
-    if IS_WIN:
-        return "packageMsi"
-    if IS_MAC:
-        return "packageDmg"
-    return "packageDeb"
+def build_installer(app_dir: Path) -> Path:
+    """用 PyInstaller onefile 生成安装器（安装时创建桌面快捷方式）。"""
+    if not INSTALLER_ENTRY.exists():
+        sys.exit(f"缺少安装器入口：{INSTALLER_ENTRY}")
+    shutil.rmtree(INSTALLER_OUT, ignore_errors=True)
+    INSTALLER_OUT.mkdir(parents=True, exist_ok=True)
+    name = "MAHE-Setup"
+    env = os.environ.copy()
+    env.pop("LD_LIBRARY_PATH", None)
+    run([sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean",
+         "--onefile", "--name", name,
+         "--add-data", f"{app_dir}{os.pathsep}app",
+         "--distpath", str(INSTALLER_OUT),
+         "--workpath", str(INSTALLER_OUT / "work"),
+         "--specpath", str(INSTALLER_OUT),
+         str(INSTALLER_ENTRY)], env=env)
+    exe = INSTALLER_OUT / (name + (".exe" if IS_WIN else ""))
+    if not exe.is_file():
+        sys.exit(f"安装器未产出可执行文件：{exe}")
+    return exe
 
 
 def bundle_app(cxx: str, no_asm: bool) -> None:
-    """构建扩展 → 冻结引擎 → 调用 Gradle/jpackage 产出安装包。"""
+    """构建扩展 → 冻结引擎 → 组装载荷 → 生成安装器。"""
     obj_dir = BUILD / "obj"
     obj_dir.mkdir(parents=True, exist_ok=True)
     asm_obj = build_asm(cxx, no_asm, obj_dir)
-    objs = build_objects(cxx, obj_dir, extra=[])
+    objs = build_objects(cxx, obj_dir, extra=asm_defines(cxx, asm_obj))
     build_extension(cxx, objs, asm_obj)
 
     engine_dir = build_engine()
-    install_engine_into_ui(engine_dir)
+    app_dir = assemble_app(engine_dir)
+    installer = build_installer(app_dir)
+    log(f"安装器：{installer}")
+    log("安装器会复制程序文件并创建桌面快捷方式（Windows 同时创建开始菜单项）")
 
-    gradlew = UI_DIR / ("gradlew.bat" if IS_WIN else "gradlew")
-    if not gradlew.exists():
-        sys.exit(f"未找到 Gradle wrapper：{gradlew}")
-    if not shutil.which("java") and not os.environ.get("JAVA_HOME"):
-        sys.exit("未找到 JDK（jpackage 需要 JDK 17+）：\n"
-                 "  Windows: winget install EclipseAdoptium.Temurin.17.JDK\n"
-                 "  macOS:   brew install --cask temurin@17\n"
-                 "  Linux:   sudo apt install openjdk-17-jdk")
-    if not IS_WIN:
-        try:
-            gradlew.chmod(0o755)
-        except OSError:
-            pass
-    task = gradle_task()
-    log(f"调用 Gradle：{task}（需 JDK 17+，首次会联网下载依赖）")
-    run([str(gradlew), task], cwd=str(UI_DIR))
-
-    pattern = {"msi": "*.msi", "dmg": "*.dmg", "deb": "*.deb"}[
-        "msi" if IS_WIN else ("dmg" if IS_MAC else "deb")]
-    out_dir = UI_DIR / "build" / "compose" / "binaries" / "main" / \
-        ("msi" if IS_WIN else ("dmg" if IS_MAC else "deb"))
-    outs = sorted(out_dir.glob(pattern)) if out_dir.exists() else []
-    if outs:
-        for f in outs:
-            log(f"安装包：{f}")
-    else:
-        log(f"未找到安装包产物，请检查 {out_dir}")
 
 
 def main() -> None:
@@ -511,16 +511,19 @@ def main() -> None:
                          "如 linux-x86_64,linux-aarch64,mac-arm64,windows-x86_64")
     ap.add_argument("--master-index", type=int, default=0,
                     help="哪台设备作为 master（默认第 0 台）")
-    # 一体化安装包：Python 引擎 + UI + JRE 打成一个安装包
+    # 一体化安装器：Python 引擎 + Web UI 打成单文件安装器
     ap.add_argument("--bundle", action="store_true",
-                    help="生成当前平台的一体化安装包（MSI/DMG/DEB）")
+                    help="生成当前平台的一体化安装器（含桌面快捷方式）")
     args = ap.parse_args()
 
     if args.clean:
         shutil.rmtree(BUILD, ignore_errors=True)
         for f in EXT_OUT.glob("mahe_core*"):
             f.unlink()
-        shutil.rmtree(APP_RES_DIR, ignore_errors=True)
+        # 旧版 Kotlin/Compose 构建残留（若存在）
+        shutil.rmtree(ROOT / "ui" / "build", ignore_errors=True)
+        shutil.rmtree(ROOT / "ui" / ".gradle", ignore_errors=True)
+        shutil.rmtree(ROOT / "ui" / "resources", ignore_errors=True)
         log("已清理")
         return
 
@@ -544,7 +547,7 @@ def main() -> None:
         return
 
     asm_obj = build_asm(cxx, args.no_asm, obj_dir)
-    objs = build_objects(cxx, obj_dir, extra=[])
+    objs = build_objects(cxx, obj_dir, extra=asm_defines(cxx, asm_obj))
 
     if args.test:
         test_bin = build_tests(cxx, objs, asm_obj)

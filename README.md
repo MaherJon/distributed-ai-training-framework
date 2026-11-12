@@ -8,17 +8,19 @@
 parameter-server architecture — no GPU budget required, starting from 2-core CPUs.
 The master only aggregates parameters and schedules work; workers train on local
 shards with their own compute. The core is C++17 with hand-written SIMD assembly,
-Python drives training and orchestration, and Kotlin Compose provides a desktop
-console.
+Python drives training and orchestration, and a self-contained web terminal
+(HTML/CSS/JS served by Python) provides the control console.
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 ![C++17](https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus&logoColor=white)
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
-![UI](https://img.shields.io/badge/UI-Kotlin%20Compose-7F52FF?logo=kotlin&logoColor=white)
+![UI](https://img.shields.io/badge/UI-HTML%20%2F%20CSS%20%2F%20JS-58E0B6?logo=html5&logoColor=white)
 ![Status](https://img.shields.io/badge/status-v0.1-orange)
 
 If this project helps you, a star is appreciated.
+
+![demo](./docs/demo.gif)
 
 ---
 
@@ -32,8 +34,8 @@ If this project helps you, a star is appreciated.
 - [SIMD kernels](#simd-kernels)
 - [Cross-platform builds](#cross-platform-builds)
 - [LAN cluster](#lan-cluster)
-- [Desktop console](#desktop-console)
-- [One-click installers](#one-click-installers)
+- [Web console](#web-console)
+- [One-click installer](#one-click-installer)
 - [Project layout](#project-layout)
 - [Testing](#testing)
 - [Roadmap](#roadmap)
@@ -56,9 +58,9 @@ User guide (Chinese): [docs/USER_GUIDE.md](docs/USER_GUIDE.md) · Design doc (Ch
 - **No platform or compiler lock-in.** One build script covers Windows (MinGW/MSVC),
   Linux and macOS. x86-64 uses AVX2, Apple Silicon/ARM64 uses NEON, and missing
   assembler toolchains fall back to scalar code automatically.
-- **Distribute as one installer.** The Python engine, C++ kernels, Kotlin UI and a
-  trimmed JRE are packed into a single MSI/DMG/DEB — end users install no Python,
-  numpy or JDK.
+- **Distribute as one installer.** The Python engine, C++ kernels and web terminal
+  are packed into a single installer that creates desktop shortcuts — end users
+  install no Python, numpy or JDK.
 
 ## Key features
 
@@ -71,8 +73,9 @@ User guide (Chinese): [docs/USER_GUIDE.md](docs/USER_GUIDE.md) · Design doc (Ch
 | Fault-tolerant scheduling | Heartbeat watchdog reclaims dead nodes' shards; each round waits for `--min-workers` |
 | SIMD kernels | AVX2 (x86-64) / NEON (aarch64) for delta reduction and SGD update, dispatched at runtime |
 | Checkpoints | `.npz` written at end/interruption, resumable |
-| Observable UI | JSON Lines control channel; UI crash or disconnect never affects training, reconnect resyncs snapshots |
-| One-click packaging | `build.py --bundle` produces MSI / DMG / DEB |
+| Observable UI | Browser web terminal on `127.0.0.1:47830`; boot subtitles finish before training init; logs stream as `[KIND] message` |
+| LAN scan & deploy | Discover LAN hosts, filter by remote-management ports, then pull source from GitHub and build workers |
+| One-click installer | `build.py --bundle` produces a single-file installer that creates desktop shortcuts |
 | Cluster packaging | `--build-cluster` generates master/worker bundles by device count and OS |
 
 ## Quick start
@@ -87,6 +90,11 @@ python3 build.py               # build the Python extension
 
 PYTHONPATH=python python3 -m mahe.demo_train --role demo --rounds 20
 ```
+
+The demo opens `http://127.0.0.1:47830/` in your browser. The boot animation runs
+first; training modules are initialized only after the page sends `ui_ready`.
+Initialization logs appear in the left info panel as `[INIT] ...`. Use
+`--no-browser` to suppress auto-open and `--no-ui` for headless servers.
 
 Real terminal output:
 
@@ -106,8 +114,8 @@ Full dependency, compiler and troubleshooting notes are in the
 ## Architecture
 
 ```text
-Kotlin Compose console  (separate process, crash-isolated)
-        │  127.0.0.1:47830 · JSON Lines
+Web terminal (browser, separate process, crash-isolated)
+        │  127.0.0.1:47830 · HTTP + SSE + JSON
 Python control plane — master  (aggregation / eval / checkpoints / UI events)
         │  pybind11
 C++17 core — transport · discovery · scheduler · kernel
@@ -168,7 +176,7 @@ prints `avx2`, `neon` or `scalar`. Use `--no-asm` to force the scalar path.
 ```bash
 python build.py                     # core + Python extension
 python build.py --test              # build and run C++ tests
-python build.py --bundle            # one-click installer (engine + UI + JRE)
+python build.py --bundle            # one-click installer (engine + web UI)
 python build.py --no-asm            # force scalar kernels
 python build.py --compiler g++-13   # pick a compiler
 python build.py --clean             # remove artifacts
@@ -213,40 +221,64 @@ Output lands in `build/cluster/device_XX_<role>_<os>-<arch>/`, each containing s
 build scripts, launch scripts and `device_info.json`. Devices matching the build host
 get a prebuilt extension; others build on first launch on the target machine.
 
-## Desktop console
+## Web console
 
-A standalone Kotlin Compose Desktop process subscribing to events on `127.0.0.1:47830`:
+The web terminal is served by the Python control plane on `127.0.0.1:47830` and
+opens automatically (HTML/CSS/JS, no external dependencies).
 
 ```bash
-cd ui
-./gradlew run          # Windows: .\gradlew.bat run
+python3 -m mahe.demo_train --role demo      # opens the browser
+python3 -m mahe.demo_train --role master    # LAN master + console
+python3 -m mahe.demo_train --role master --no-browser --no-ui   # headless
 ```
 
-Start training first (`demo` or `master` opens 47830), then the UI. The console shows a
-boot self-check sequence, the node table, loss/acc curves and the event log; the
-`◉ LINKED` / `◌ OFFLINE` indicator in the top-right shows connection state.
+Flow:
 
-## One-click installers
+1. The browser plays the boot subtitles.
+2. On completion it posts `ui_ready`; only then does the backend initialize the
+   C++ core, scheduler and training modules.
+3. Initialization messages appear in the left info panel as `[INIT] …`, `[WARN] …`,
+   `[ERROR] …`.
+4. After initialization, a deployment panel offers LAN auto-deploy or manual scripts.
 
-Pack the Python engine, C++/NEON kernels, Kotlin UI and a trimmed JRE into one installer:
+The layout is an intentionally restrained eDEX-style terminal: dark background,
+hairline grid, monospace type and a single teal accent. The console shows boot
+output, the node table, loss/acc curves, an event log and the deployment view.
+Closing the browser does not affect training; reopening resyncs a full snapshot.
+
+### Sub-node deployment
+
+- **Scan**: the master probes its private /24 (or a user-supplied CIDR), resolves
+  hostnames and checks SSH/SMB/RDP/WinRM/AFP/VNC ports. Results show device name,
+  type and whether auto-deploy is possible.
+- **Deploy**: for SSH-capable hosts, the master runs a generated bootstrap script
+  that shallow-clones the configured GitHub repository/branch, installs
+  numpy/pybind11, runs `build.py`, and starts a worker in the background.
+- **Manual**: download the POSIX or Windows script and run it on the target machine.
+  Automatic deployment uses SSH key auth (`BatchMode`); passwords are never stored.
+
+## One-click installer
+
+Pack the frozen Python engine and the web terminal into a single-file installer:
 
 ```bash
-python -m pip install pyinstaller   # plus JDK 17+
+python -m pip install pyinstaller
 python build.py --bundle
 ```
 
-| Platform | Artifact | Path |
-|---|---|---|
-| Windows | MSI | `ui/build/compose/binaries/main/msi/MAHE-1.0.0.msi` |
-| macOS | DMG | `ui/build/compose/binaries/main/dmg/MAHE-1.0.0.dmg` |
-| Linux | DEB | `ui/build/compose/binaries/main/deb/*.deb` |
+| Platform | Artifact |
+|---|---|
+| Windows | `build/installer/MAHE-Setup.exe` |
+| macOS | `build/installer/MAHE-Setup` |
+| Linux | `build/installer/MAHE-Setup` |
 
-After installation, just launch the icon: when port 47830 is not listening, the UI
-spawns the bundled `mahe-engine` (default `--role demo`; override with
-`MAHE_ENGINE_ROLE=master|worker`).
+The installer runs per-user (no admin rights) and always creates a **desktop
+shortcut**; on Windows it also creates a Start Menu entry and an uninstall
+registry item. Launching the shortcut starts `mahe-engine` (default `--role demo`,
+override with `MAHE_ENGINE_ROLE=master|worker`) and opens the web terminal.
 
-PyInstaller and jpackage only produce artifacts for the host platform, so build each
-target on its own OS. Size is roughly 100–130 MB. Public macOS distribution additionally
+PyInstaller only produces artifacts for the host platform, so build each target on
+its own OS. Size is roughly 100–130 MB. Public macOS distribution additionally
 requires signing and notarization.
 
 ## Project layout
@@ -263,10 +295,14 @@ python/mahe/
   model.py              NumPy MLP (CPU-only reference backend)
   worker_node.py        local multi-step training, Δ upload
   master_node.py        parameter server: weighted aggregation, eval, checkpoints
-  ui_bridge.py          JSON Lines control channel
+  web_server.py         HTTP + SSE + command channel
+  webui/                static web terminal (HTML/CSS/JS)
+  lan_scan.py           LAN device discovery and deployability filter
+  deployer.py           GitHub source pull + remote build/deploy scripts
   demo_train.py         demo / master / worker entry point
-ui/                     Kotlin Compose Desktop console
-packaging/              PyInstaller entry point
+packaging/
+  engine_entry.py       PyInstaller entry for mahe-engine
+  installer_entry.py    installer: copy files + desktop shortcuts
 docs/USER_GUIDE.md      user guide (Chinese)
 build.py                cross-platform build / test / cluster bundling / installer
 ```
@@ -284,15 +320,16 @@ Coverage:
 - Weighted sharding 3:1 → 750/250
 - Task dispatch, completion, node removal
 - Master/worker handshake, token rejection, bidirectional messages, graceful shutdown
+- Web terminal: static assets, `ui_ready` handshake and `/api/status` snapshot (smoke test)
 
 End-to-end: `--role demo` really spawns 2 worker subprocesses and writes a checkpoint.
 
 ## Roadmap
 
 - **v0.1 (current)**: C++ core + AVX2/NEON kernels + Python parameter-server training +
-  local demo + UI scaffold
+  local demo + web terminal + LAN deployment flow
 - **v0.2**: real multi-machine LAN validation, checkpoint resume, int8 gradient compression
-- **v0.3**: PyTorch backend, full three-view UI and control commands
+- **v0.3**: PyTorch backend, richer web console views and control commands
 - **v0.4**: TLS, web monitoring endpoint
 
 ## Known limitations
@@ -300,8 +337,8 @@ End-to-end: `--role demo` really spawns 2 worker subprocesses and writes a check
 - The training backend is a NumPy MLP (CPU); PyTorch is not wired up yet.
 - int8 gradient compression is designed but not implemented.
 - Multi-machine validation is mostly local multi-process; real LAN deployment follows the guide.
-- The UI is a working console scaffold; create-cluster / start-stop interactions are not
-  wired to control commands yet.
+- Automatic sub-node deployment requires SSH key authentication; Windows hosts that
+  only expose WinRM must use the manual PowerShell script.
 
 ## Contributing
 

@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MAHE // 分布式训练终端</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<!-- 启动字幕：播放完成前，后端不会初始化训练模块 -->
+<div id="boot" class="boot">
+  <div class="boot-frame">
+    <div class="boot-top">
+      <span class="boot-brand">MAHE<span class="cursor">_</span></span>
+      <span class="boot-title">DISTRIBUTED TRAINING TERMINAL</span>
+      <span id="boot-pill" class="pill booting">UI INIT</span>
+    </div>
+    <div id="boot-lines" class="boot-lines"></div>
+    <div class="boot-bar"><i id="boot-bar"></i></div>
+    <div class="boot-bottom">
+      <span>MAHE CORE v0.1</span>
+      <span id="boot-hint">初始化界面…</span>
+    </div>
+  </div>
+</div>
+
+<!-- 主界面 -->
+<div id="app" class="shell hidden">
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">▚ MAHE</span>
+      <span class="brand-sub">分布式训练终端</span>
+    </div>
+    <nav class="menu" id="menu">
+      <button class="nav-item active" data-view="dashboard">总览</button>
+      <button class="nav-item" data-view="cluster">集群</button>
+      <button class="nav-item" data-view="deploy">部署</button>
+      <button class="nav-item" data-view="logs">日志</button>
+    </nav>
+    <div class="top-right">
+      <span id="status-pill" class="pill booting">BOOTING</span>
+      <span id="link" class="link offline">◌ OFFLINE</span>
+    </div>
+  </header>
+
+  <div class="layout">
+    <!-- 左上角菜单栏下方：信息输出区 -->
+    <aside class="sidebar">
+      <div class="side-head">
+        <span>INFO STREAM</span>
+        <span id="info-count" class="dim">0</span>
+      </div>
+      <div id="info-stream" class="info-stream"></div>
+      <div class="meta">
+        <div><span>内核</span><b id="meta-kernel">—</b></div>
+        <div><span>MASTER</span><b id="meta-master">—</b></div>
+        <div><span>节点</span><b id="meta-nodes">0</b></div>
+        <div><span>轮次</span><b id="meta-round">0</b></div>
+      </div>
+    </aside>
+
+    <main class="content">
+      <!-- 总览 -->
+      <section id="view-dashboard" class="view">
+        <div class="metrics">
+          <div class="metric"><span>ROUND</span><b id="m-round">0</b></div>
+          <div class="metric"><span>EVAL LOSS</span><b id="m-loss">—</b></div>
+          <div class="metric"><span>EVAL ACC</span><b id="m-acc">—</b></div>
+          <div class="metric"><span>NODES</span><b id="m-nodes">0</b></div>
+        </div>
+        <div class="grid">
+          <div class="panel chart-panel">
+            <div class="panel-head">
+              <span>LOSS / ACC</span>
+              <span id="chart-note" class="dim">等待训练数据</span>
+            </div>
+            <div class="chart-wrap"><canvas id="chart"></canvas></div>
+            <div class="legend">
+              <span class="legend-loss">■ LOSS</span>
+              <span class="legend-acc">■ ACC</span>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><span>CLUSTER NODES</span><span id="node-badge" class="dim">0</span></div>
+            <div id="node-list" class="node-list"></div>
+          </div>
+        </div>
+        <div class="grid">
+          <div class="panel log-panel">
+            <div class="panel-head"><span>EVENT LOG</span><span class="dim">最近 200 条</span></div>
+            <div id="event-log" class="event-log"></div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><span>QUICK ACTIONS</span></div>
+            <div class="actions">
+              <button id="btn-scan" class="btn">扫描局域网</button>
+              <button id="btn-manual" class="btn ghost">手动部署</button>
+              <button id="btn-stop" class="btn danger ghost">停止训练</button>
+            </div>
+            <p class="hint">扫描仅限私有网段；自动部署需要目标机开放 SSH 并配置免密登录。</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- 集群 -->
+      <section id="view-cluster" class="view hidden">
+        <div class="panel fill">
+          <div class="panel-head"><span>集群节点</span><span id="cluster-summary" class="dim">0 个节点</span></div>
+          <div id="node-list-full" class="node-list full"></div>
+        </div>
+      </section>
+
+      <!-- 部署 -->
+      <section id="view-deploy" class="view hidden">
+        <div class="panel fill">
+          <div class="panel-head"><span>局域网设备与子端部署</span><span id="scan-state" class="dim">未扫描</span></div>
+          <div class="scan-bar">
+            <input id="subnet" placeholder="扫描网段（留空 = 本机 /24，如 192.168.1.0/24）">
+            <button id="btn-scan-2" class="btn">扫描</button>
+            <span id="device-summary" class="dim"></span>
+          </div>
+          <div class="table-wrap">
+            <table class="device-table">
+              <thead>
+                <tr><th></th><th>设备</th><th>地址</th><th>类型</th><th>开放端口</th><th>部署条件</th></tr>
+              </thead>
+              <tbody id="device-body"></tbody>
+            </table>
+          </div>
+          <div class="deploy-controls">
+            <input id="ssh-user" placeholder="SSH 用户名（自动部署需要）">
+            <button id="btn-deploy" class="btn">部署选中设备</button>
+            <button id="btn-manual-2" class="btn ghost">手动部署脚本</button>
+          </div>
+          <pre id="deploy-log" class="console"></pre>
+        </div>
+      </section>
+
+      <!-- 日志 -->
+      <section id="view-logs" class="view hidden">
+        <div class="panel fill">
+          <div class="panel-head"><span>全部事件</span><span class="dim">最近 200 条</span></div>
+          <div id="event-log-full" class="event-log full"></div>
+        </div>
+      </section>
+    </main>
+  </div>
+</div>
+
+<!-- 部署方式选择：UI 与训练模块初始化完成后弹出 -->
+<div id="modal-choice" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-head">
+      <span>子端部署</span>
+      <button class="icon-btn" data-close="modal-choice">✕</button>
+    </div>
+    <p class="modal-text">
+      训练模块已完成初始化。可以扫描局域网自动部署子端，也可以手动执行脚本。
+    </p>
+    <div class="choice-row">
+      <button id="choice-scan" class="btn">扫描局域网并部署</button>
+      <button id="choice-manual" class="btn ghost">手动部署</button>
+      <button id="choice-later" class="btn ghost">稍后</button>
+    </div>
+    <p class="hint">自动部署会从 GitHub 拉取源码，在目标机执行 build.py 后启动 Worker。</p>
+  </div>
+</div>
+
+<!-- 手动部署脚本 -->
+<div id="modal-manual" class="modal hidden">
+  <div class="modal-card wide">
+    <div class="modal-head">
+      <span>手动部署脚本</span>
+      <button class="icon-btn" data-close="modal-manual">✕</button>
+    </div>
+    <div class="tabs">
+      <button class="tab active" data-platform="posix">Linux / macOS</button>
+      <button class="tab" data-platform="windows">Windows</button>
+    </div>
+    <pre id="script-view" class="console tall">加载中…</pre>
+    <div class="modal-foot">
+      <button id="btn-copy" class="btn ghost">复制</button>
+      <button id="btn-download" class="btn">下载脚本</button>
+    </div>
+    <p class="hint" id="manual-meta"></p>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
