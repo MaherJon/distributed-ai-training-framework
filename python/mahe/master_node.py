@@ -95,13 +95,22 @@ class MasterNode:
                 self._cv.notify_all()
 
     # ---- 等待 ≥min_workers 个存活节点 ----
-    def wait_workers(self, min_workers: int, timeout_s: float = 60.0) -> bool:
+    def wait_workers(self, min_workers: int, timeout_s: float = 1800.0) -> bool:
+        """等待节点入网。
+
+        超时给得比较宽：Master 往往在子端编译部署完成后才等到第一个 Worker。
+        """
         t0 = time.time()
+        last_note = 0.0
         while time.time() - t0 < timeout_s:
             if self.core.scheduler().alive_count() >= min_workers:
                 return True
             if self.stop_flag:
                 return False
+            if time.time() - last_note > 15:
+                last_note = time.time()
+                log.info("等待 Worker 入网（当前 %d / 需要 %d）…",
+                         self.core.scheduler().alive_count(), min_workers)
             time.sleep(0.2)
         return False
 

@@ -4,9 +4,9 @@ __pycache__/
 python/mahe/mahe_core*.so
 python/mahe/mahe_core*.pyd
 checkpoints/
-ui/build/
-ui/.gradle/
-ui/resources/engine/
 build/pyinstaller/
 *.o
 *.obj
+
+# 旧版 Kotlin/Compose UI 已移除，忽略其残留构建产物
+ui/

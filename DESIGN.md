@@ -26,7 +26,7 @@ GPU 集群与租用显卡成本高昂，个人爱好者难以负担。MAHE 的�
 | 自研网络协议 + 汇编介入网络层 | 传输层瓶颈在 syscall/内核，自研协议相对 TCP 无收益，反而引入可靠性与安全问题 | 传输用 **TCP**，应用层定义**轻量二进制帧协议**（魔数+类型+长度+负载，~16B 头）；汇编不碰网络 |
 | 汇编"暴力加速"性能拉胯的设备 | 方向正确但落点不清 | 汇编只用于**计算热点内核**：梯度归约（reduce-add）、权重更新、（可选）int8 量化。这些是可证明的热点，AVX2 相对标量有 4~8 倍收益。运行时 CPUID 探测，无 AVX2 自动回退 C 实现 |
 | 未定义并行策略 | 分布式训练的核心缺失 | **参数服务器（PS）架构 + 算力加权数据并行**；同步模式采用 **FedAvg 式本地多步聚合**（降低通信频率），支持 stale 容忍的半异步 |
-| UI 逻辑写在 Python 层 | Kotlin UI 与 Python 紧耦合、跨进程边界混乱 | UI 是**独立进程**，通过 localhost 控制信道（JSON Lines over TCP）与 Python 控制面通信；Python 层暴露 ClusterController API |
+| UI 逻辑写在 Python 层 | Kotlin UI 与 Python 紧耦合、跨进程边界混乱 | UI 是**独立进程**：浏览器加载 Python 托管的静态 Web 终端，通过 localhost（HTTP + SSE + JSON 指令）与控制面通信；Python 层暴露 ClusterController API |
 | 无容错设计 | 弱设备集群掉线是常态 | 心跳（默认 3s 周期 / 10s 判死）+ 任务重派 + 周期性检查点 |
 | 无安全设计 | 局域网不等于可信网络（宿舍/公司网）| 集群令牌（cluster token）认证握手；发现广播不含敏感信息 |
 
@@ -34,15 +34,17 @@ GPU 集群与租用显卡成本高昂，个人爱好者难以负担。MAHE 的�
 
 ```text
 高层 ┌──────────────────────────────────────────────┐
-     │  UI 进程（Kotlin Compose Desktop，550W 风格） │
+     │  Web 终端（浏览器，eDEX 风格收敛版）            │
      └───────────────┬──────────────────────────────┘
-                     │ 控制信道：localhost TCP / JSON Lines
-                     │ （事件：集群状态/进度/日志；指令：建集群/起停训练）
+                     │ 控制信道：localhost HTTP
+                     │ 事件：SSE；指令：JSON POST
      ┌───────────────┴──────────────────────────────┐
      │  Python 控制面 + 训练核心（mahe 包）            │
+     │  · WebUiServer：静态页面/事件流/指令分发        │
      │  · ClusterController：建集群/节点管理/任务编排   │
      │  · Trainer：模型定义、本地多步训练、梯度产出      │
      │  · ParameterServer：加权聚合、优化器、检查点     │
+     │  · lan_scan / deployer：局域网扫描与子端部署     │
      │  · 通过 pybind11 扩展 mahe_core 调用 C++ 核心    │
      └───────────────┬──────────────────────────────┘
                      │ pybind11（同进程，零拷贝传 NumPy buffer）
@@ -56,8 +58,13 @@ GPU 集群与租用显卡成本高昂，个人爱好者难以负担。MAHE 的�
 低层        │  节点间：TCP（控制+梯度）  节点发现：UDP 广播
 ```
 
-**进程拓扑**：Master 节点跑完整栈（UI + Python 控制面 + C++ 核心 + PS）；
+**进程拓扑**：Master 节点跑完整栈（浏览器 UI + Python 控制面 + C++ 核心 + PS）；
 Worker 节点跑精简栈（Python worker + C++ 核心，无 UI）。Worker 只被动接任务。
+
+**初始化握手**：Web 服务先启动，但 C++ 核心/调度器/训练模块保持未初始化；
+前端播放完启动字幕后才 POST `ui_ready`，控制面收到信号再初始化训练链路。
+初始化日志通过 SSE 输出到界面左侧信息区，格式 `[信息类型] 内容`。
+这样避免了“界面还没准备好，后端已经广播/占用端口/开始训练”的竞态。
 
 ## 4. 应用层协议（帧格式）
 
@@ -137,22 +144,28 @@ ARM（Mac）走 NEON intrinsics 回退路径。
 
 ## 8. Python 层
 
-- `mahe.cluster.ClusterController`：集群生命周期、节点表、事件总线（→UI）；
-- `mahe.trainer`：模型抽象（NumPy 实现 MLP，后续接 PyTorch 后端）、本地多步循环；
-- `mahe.ps.ParameterServer`：Δ 加权聚合（调用汇编内核）、SGD/Adam、检查点；
-- `mahe.ui_bridge`：localhost JSON Lines 控制信道服务端；
-- 演示：`demo_train.py` 在合成分类数据上做 2  worker 数据并行训练。
+- `mahe.web_server.WebUiServer`：回环 HTTP 服务，负责静态页面、SSE 事件流、
+  JSON 指令分发与状态快照；
+- `mahe.master_node`：参数服务器、加权聚合（调用汇编内核）、评估与检查点；
+- `mahe.worker_node`：本地多步训练与 Δ 回传；
+- `mahe.lan_scan`：私有网段扫描、主机名解析、远程管理端口探测与可部署性筛选；
+- `mahe.deployer`：生成 POSIX/PowerShell 部署脚本，支持 SSH 远程执行
+  （浅克隆指定仓库/分支 → 安装依赖 → `build.py` → 后台启动 Worker）；
+- `mahe.demo_train`：demo / master / worker 入口，负责 UI 就绪握手与生命周期；
+- 演示：`demo_train.py` 在合成分类数据上做 2 worker 数据并行训练。
 
-## 9. UI（Kotlin Compose Desktop）
+## 9. Web UI（HTML/CSS/JS）
 
-- 独立 Gradle 子工程，Compose Multiplatform；
-- 550W 风格：启动自检序列（逐行系统日志 + 进度）、主界面以**排版、网格、
-  单色辉光、扫描线**体现科技感——不堆砌蓝色；
-- 三个视图：集群拓扑（节点/算力/状态）、训练监视（loss 曲线、吞吐、进度）、
-  控制台日志；
-- 通过 `ui_bridge` 与控制面通信，UI 崩溃不影响训练。
+- 静态资源位于 `python/mahe/webui/`，由 Python 直接托管，无 Node/前端构建链；
+- 设计上参考 eDEX 的全屏终端气质，但做了收敛：深色底、细线网格、等宽字体、
+  单一青绿强调色，不使用大面积辉光与高频动效；
+- 视图：总览（指标/loss 曲线/节点/事件）、集群、部署（设备表/部署日志）、日志；
+- 左上角菜单栏下方固定信息输出区，按 `[信息类型] 内容` 追加训练侧日志；
+- 初始化流程：启动字幕 → POST `ui_ready` → 后端初始化训练模块 →
+  初始化完成事件 `app_ready` → 弹出部署方式选择面板；
+- SSE 断线自动重连，服务端先补发快照；浏览器关闭不影响训练。
 
-## 10. 构建系统（build.py）
+## 10. 构建与分发（build.py）
 
 Python 驱动（跨平台），职责：
 
@@ -165,7 +178,10 @@ Python 驱动（跨平台），职责：
    - macOS：clang，跳过 NASM（标量/NEON 路径）；
 3. 构建：C++ 静态库 → 汇编内核 → pybind11 扩展；
 4. 测试：`build.py --test` 跑 C++ 单元测试；
-5. 依赖检查：pybind11/numpy 缺失时给出明确指引（不静默全局安装）。
+5. 依赖检查：pybind11/numpy 缺失时给出明确指引（不静默全局安装）；
+6. 安装器：PyInstaller onedir 冻结引擎（含 Web UI 静态资源）→ onefile 安装器；
+   安装器按用户级目录复制文件并创建桌面快捷方式，Windows 额外写开始菜单与卸载项。
+   该流程不再依赖 JDK / jpackage / WiX / Inno Setup。
 
 ## 11. 开源协议
 
@@ -173,7 +189,8 @@ GPLv3。注意 pybind11（BSD）与 NASM（BSD-2）兼容。
 
 ## 12. 路线图
 
-- v0.1（本次实现）：C++ 核心 + 汇编内核 + Python PS 训练 + 本地演示 + UI 脚手架
+- v0.1（本次实现）：C++ 核心 + 汇编内核 + Python PS 训练 + 本地演示 +
+  Web 终端 + 局域网扫描与子端部署流程
 - v0.2：真实局域网多机验证、检查点恢复、梯度压缩
-- v0.3：PyTorch 后端、UI 完整三视图
+- v0.3：PyTorch 后端、更完整的 Web 视图与控制指令
 - v0.4：TLS、Web 监控端

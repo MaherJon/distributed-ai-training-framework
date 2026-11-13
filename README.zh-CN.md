@@ -6,7 +6,8 @@
 
 **MAHE** 用参数服务器架构把局域网内的普通电脑组织成训练集群：无需 GPU 预算，
 2 核 CPU 起，Master 只做参数聚合与调度，Worker 用本地算力分摊数据。
-核心用 C++17 + SIMD 汇编实现，Python 负责训练与编排，Kotlin Compose 提供控制台界面。
+核心用 C++17 + SIMD 汇编实现，Python 负责训练与编排，自带由 Python 托管的
+Web 终端（HTML/CSS/JS）作为控制台。
 
 *English: Turn idle LAN machines into a distributed AI training cluster — parameter server,
 compute-weighted data parallelism, AVX2/NEON kernels, one-click packaging.*
@@ -15,10 +16,12 @@ compute-weighted data parallelism, AVX2/NEON kernels, one-click packaging.*
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 ![C++17](https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus&logoColor=white)
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
-![UI](https://img.shields.io/badge/UI-Kotlin%20Compose-7F52FF?logo=kotlin&logoColor=white)
+![UI](https://img.shields.io/badge/UI-HTML%20%2F%20CSS%20%2F%20JS-58E0B6?logo=html5&logoColor=white)
 ![Status](https://img.shields.io/badge/status-v0.1-orange)
 
 如果这个项目对你有帮助，欢迎点一个 Star。
+
+![演示](./docs/demo.gif)
 
 ---
 
@@ -32,8 +35,8 @@ compute-weighted data parallelism, AVX2/NEON kernels, one-click packaging.*
 - [SIMD 内核](#simd-内核)
 - [跨平台构建](#跨平台构建)
 - [局域网组网](#局域网组网)
-- [控制台界面](#控制台界面)
-- [一键安装包](#一键安装包)
+- [Web 控制台](#web-控制台)
+- [一键安装器](#一键安装器)
 - [项目结构](#项目结构)
 - [测试](#测试)
 - [路线图](#路线图)
@@ -53,8 +56,8 @@ compute-weighted data parallelism, AVX2/NEON kernels, one-click packaging.*
   通信量比“每步传梯度”低 1~2 个数量级。
 - **不挑平台、不挑编译器**：Windows（MinGW/MSVC）、Linux、macOS 同一套构建脚本；
   x86-64 走 AVX2，Apple Silicon / ARM64 走 NEON，缺汇编工具链自动回退标量实现。
-- **一个安装包就能分发**：Python 引擎、C++ 内核、Kotlin UI 与 JRE 一起打进 MSI/DMG/DEB，
-  终端用户不需要装 Python、numpy 或 JDK。
+- **一个安装器就能分发**：Python 引擎、C++ 内核与 Web 终端一起打进安装器，
+  安装时自动创建桌面快捷方式；终端用户不需要装 Python、numpy 或 JDK。
 
 ## 核心特性
 
@@ -67,8 +70,9 @@ compute-weighted data parallelism, AVX2/NEON kernels, one-click packaging.*
 | 容错调度 | 心跳看门狗回收掉线节点，分片回到待派池；每轮聚合前等待 `--min-workers` |
 | SIMD 内核 | AVX2（x86-64）/ NEON（aarch64）实现梯度归约与 SGD 更新，运行时自动分发 |
 | 检查点 | 训练结束/中断落盘 `.npz`，可续训 |
-| 可观测 UI | JSON Lines 控制信道，UI 崩溃或断开不影响训练，重连自动补快照 |
-| 一体化分发 | `build.py --bundle` 产出 MSI / DMG / DEB |
+| 可观测界面 | 浏览器访问 `127.0.0.1:47830`；启动字幕完成前不初始化训练；日志按 `[类型] 内容` 输出 |
+| 局域网扫描部署 | 发现在线设备并按远程管理端口筛选，确认后从 GitHub 拉取源码在子端编译 |
+| 一体化安装器 | `build.py --bundle` 生成单文件安装器，自动创建桌面快捷方式 |
 | 集群打包 | `--build-cluster` 按设备数量与系统生成 master/worker 部署包 |
 
 ## 快速开始
@@ -83,6 +87,11 @@ python3 build.py               # 构建 Python 扩展
 
 PYTHONPATH=python python3 -m mahe.demo_train --role demo --rounds 20
 ```
+
+演示会自动在浏览器打开 `http://127.0.0.1:47830/`。启动字幕播放完成后，
+前端才向 Python 控制面发送 `ui_ready`，随后训练模块开始初始化；初始化日志
+在左侧信息区按 `[INIT] 内容` 输出。`--no-browser` 可关闭自动打开浏览器，
+`--no-ui` 用于无界面的服务器场景。
 
 终端实录：
 
@@ -100,9 +109,9 @@ Windows 用 `set PYTHONPATH=%CD%\python` 代替 `PYTHONPATH=python`，其余相�
 
 ```text
 ┌──────────────────────────────┐
-│ Kotlin Compose 控制台         │  独立进程，崩溃不影响训练
+│ Web 终端（浏览器，独立进程）  │  崩溃/关闭不影响训练
 └──────────────┬───────────────┘
-               │ localhost:47830 · JSON Lines
+               │ localhost:47830 · HTTP + SSE + JSON
 ┌──────────────▼───────────────┐
 │ Python 控制面（Master）       │  参数聚合 / 评估 / 检查点 / UI 事件
 └──────────────┬───────────────┘
@@ -161,7 +170,7 @@ Windows 用 `set PYTHONPATH=%CD%\python` 代替 `PYTHONPATH=python`，其余相�
 ```bash
 python build.py                     # 核心 + Python 扩展
 python build.py --test              # 构建并运行 C++ 单测
-python build.py --bundle            # 一体化安装包（引擎 + UI + JRE）
+python build.py --bundle            # 一体化安装器（引擎 + Web 终端）
 python build.py --no-asm            # 强制标量内核
 python build.py --compiler g++-13   # 指定编译器
 python build.py --clean             # 清理产物
@@ -205,37 +214,59 @@ python3 build.py --build-cluster \
 启动脚本与 `device_info.json`；与打包机同系统的设备会预编译扩展，其余首次运行时
 在目标机自动构建。
 
-## 控制台界面
+## Web 控制台
 
-Kotlin Compose Desktop 独立进程，通过 `127.0.0.1:47830` 订阅事件：
+Web 终端由 Python 控制面托管在 `127.0.0.1:47830`，训练启动后自动打开浏览器
+（HTML/CSS/JS，无外部依赖）。
 
 ```bash
-cd ui
-./gradlew run          # Windows: .\gradlew.bat run
+python3 -m mahe.demo_train --role demo      # 自动打开浏览器
+python3 -m mahe.demo_train --role master    # 局域网 Master + 控制台
+python3 -m mahe.demo_train --role master --no-browser --no-ui   # 无界面
 ```
 
-先启动训练（`demo` 或 `master` 都会开启 47830），再启动 UI。界面包含启动自检序列、
-集群节点表、loss/acc 曲线与事件日志；右上角 `◉ LINKED` / `◌ OFFLINE` 显示连接状态。
+初始化流程：
 
-## 一键安装包
+1. 浏览器播放启动字幕；
+2. 播放完成后 POST `ui_ready`，后端这时才初始化 C++ 核心、调度器与训练模块；
+3. 初始化信息在左侧信息区按 `[INIT] …`、`[WARN] …`、`[ERROR] …` 输出；
+4. 初始化完成后弹出子端部署面板，可选择扫描局域网自动部署或手动脚本。
 
-把 Python 引擎、C++/NEON 内核、Kotlin UI 与精简 JRE 打成一个安装包：
+界面是收敛版的 eDEX 风格：深色底、细线网格、等宽字体与单一青绿强调色，
+包含启动输出、节点表、loss/acc 曲线、事件日志与部署视图。关闭浏览器不影响训练，
+重新打开会收到完整快照。
+
+### 子端部署
+
+- **扫描**：Master 探测本机私有 /24（也可手动指定 CIDR），解析主机名并检测
+  SSH/SMB/RDP/WinRM/AFP/VNC 端口；列表显示设备名称、类型与是否可自动部署。
+- **自动部署**：对开放 SSH 的设备，Master 通过 SSH 执行生成的引导脚本：
+  浅克隆指定 GitHub 仓库/分支 → 安装 numpy/pybind11 → 运行 `build.py` →
+  后台启动 Worker。
+- **手动部署**：下载 POSIX 或 Windows 脚本，在目标机执行。自动部署使用 SSH
+  密钥（`BatchMode`），不保存任何密码。
+
+## 一键安装器
+
+把冻结后的 Python 引擎与 Web 终端打成单文件安装器：
 
 ```bash
-python -m pip install pyinstaller   # 另需 JDK 17+
+python -m pip install pyinstaller
 python build.py --bundle
 ```
 
-| 平台 | 产物 | 路径 |
-|---|---|---|
-| Windows | MSI | `ui/build/compose/binaries/main/msi/MAHE-1.0.0.msi` |
-| macOS | DMG | `ui/build/compose/binaries/main/dmg/MAHE-1.0.0.dmg` |
-| Linux | DEB | `ui/build/compose/binaries/main/deb/*.deb` |
+| 平台 | 产物 |
+|---|---|
+| Windows | `build/installer/MAHE-Setup.exe` |
+| macOS | `build/installer/MAHE-Setup` |
+| Linux | `build/installer/MAHE-Setup` |
 
-安装后双击图标即可：UI 发现 47830 无监听时自动拉起内置 `mahe-engine`
-（默认 `--role demo`，可用 `MAHE_ENGINE_ROLE=master|worker` 覆盖）。
-PyInstaller 与 jpackage 只产出本机平台产物，三平台需分别在对应系统上构建；
-体积约 100–130 MB。macOS 对外分发还需签名与公证。
+安装器按用户级安装（无需管理员权限），并且**一定会创建桌面快捷方式**；
+Windows 还会创建开始菜单项与卸载注册表项。双击快捷方式即启动 `mahe-engine`
+（默认 `--role demo`，可用 `MAHE_ENGINE_ROLE=master|worker` 覆盖）并打开 Web 终端。
+
+PyInstaller 只产出本机平台产物，三平台需分别在对应系统上构建；体积约 100–130 MB。
+macOS 对外分发还需签名与公证。
 
 ## 项目结构
 
@@ -251,12 +282,16 @@ python/mahe/
   model.py              NumPy MLP（CPU-only 参考后端）
   worker_node.py        本地多步训练、Δ 回传
   master_node.py        参数服务器：加权聚合、评估、检查点
-  ui_bridge.py          JSON Lines 控制信道
+  web_server.py         HTTP + SSE + 指令通道
+  webui/                静态 Web 终端（HTML/CSS/JS）
+  lan_scan.py           局域网设备发现与可部署性筛选
+  deployer.py           GitHub 源码拉取与远程编译部署脚本
   demo_train.py         demo / master / worker 入口
-ui/                     Kotlin Compose Desktop 控制台
-packaging/              PyInstaller 入口
+packaging/
+  engine_entry.py       mahe-engine 的 PyInstaller 入口
+  installer_entry.py    安装器：复制文件 + 创建桌面快捷方式
 docs/USER_GUIDE.md      用户手册
-build.py                跨平台构建 / 测试 / 组网打包 / 安装包
+build.py                跨平台构建 / 测试 / 组网打包 / 安装器
 ```
 
 ## 测试
@@ -272,14 +307,16 @@ python build.py --test
 - 加权分片 3:1 → 750/250
 - 任务派发、完成、节点移除
 - Master/Worker 握手、令牌拒绝、双向消息、优雅停止
+- Web 终端：静态资源、`ui_ready` 握手与 `/api/status` 快照（冒烟）
 
 端到端：`--role demo` 真实启动 2 个 Worker 子进程并落盘检查点。
 
 ## 路线图
 
-- **v0.1（当前）**：C++ 核心 + AVX2/NEON 内核 + Python 参数服务器训练 + 本地演示 + UI 脚手架
+- **v0.1（当前）**：C++ 核心 + AVX2/NEON 内核 + Python 参数服务器训练 + 本地演示 +
+  Web 终端 + 局域网子端部署流程
 - **v0.2**：真实局域网多机验证、检查点恢复、int8 梯度压缩
-- **v0.3**：PyTorch 后端、UI 完整三视图与控制指令
+- **v0.3**：PyTorch 后端、更完整的 Web 视图与控制指令
 - **v0.4**：TLS、Web 监控端
 
 ## 已知边界
@@ -287,7 +324,7 @@ python build.py --test
 - 训练后端是 NumPy MLP（CPU），尚未接 PyTorch；
 - int8 梯度压缩在设计文档中预留，尚未实现；
 - 多机验证以本机多进程为主，真实局域网需按手册组网；
-- UI 是可用的控制台脚手架，建集群/起停训练的交互尚未接控制指令。
+- 自动子端部署依赖 SSH 密钥认证；仅开放 WinRM 的 Windows 主机需使用手动脚本。
 
 ## 参与贡献
 
