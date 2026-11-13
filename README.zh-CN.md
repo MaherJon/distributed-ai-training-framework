@@ -21,7 +21,7 @@ compute-weighted data parallelism, AVX2/NEON kernels, one-click packaging.*
 
 如果这个项目对你有帮助，欢迎点一个 Star。
 
-![演示](./docs/demo.gif)
+![演示](./docs/gif/demo.gif)
 
 ---
 
