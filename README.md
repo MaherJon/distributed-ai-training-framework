@@ -73,14 +73,20 @@ User guide (Chinese): [docs/USER_GUIDE.md](docs/USER_GUIDE.md) · Design doc (Ch
 | Fault-tolerant scheduling | Heartbeat watchdog reclaims dead nodes' shards; each round waits for `--min-workers` |
 | SIMD kernels | AVX2 (x86-64) / NEON (aarch64) for delta reduction and SGD update, dispatched at runtime |
 | Checkpoints | `.npz` written at end/interruption, resumable |
+| Clean start | No demo workers and no auto-training by default; developers use `--test` / `-t` |
+| Beginner training page | Pick dataset, training preset and model location (native file dialog), then start |
+| Training-volume estimate | Live steps / samples per round / equivalent epochs, with under-/over-training hints |
+| Dataset catalog | Built-in datasets plus an optional community catalog (`--community` / `MAHE_COMMUNITY_URL`) |
+| Node group management | Remove any node from the group, or clear all; removed workers receive `BYE` and exit |
 | Observable UI | Browser web terminal on `127.0.0.1:47830`; boot subtitles finish before training init; logs stream as `[KIND] message` |
 | LAN scan & deploy | Discover LAN hosts, filter by remote-management ports, then pull source from GitHub and build workers |
 | One-click installer | `build.py --bundle` produces a single-file installer that creates desktop shortcuts |
 | Cluster packaging | `--build-cluster` generates master/worker bundles by device count and OS |
+| Assistant (reserved) | DeepSeek protocol and UI entry are wired; no network request without an API key |
 
 ## Quick start
 
-Three commands for a single-machine end-to-end demo (1 master + 2 worker subprocesses):
+Build, then launch the web terminal:
 
 ```bash
 python3 -m pip install numpy pybind11
@@ -88,13 +94,24 @@ python3 -m pip install numpy pybind11
 python3 build.py --test        # build and run C++ tests (kernel/protocol/scheduler/handshake)
 python3 build.py               # build the Python extension
 
-PYTHONPATH=python python3 -m mahe.demo_train --role demo --rounds 20
+PYTHONPATH=python python3 -m mahe.demo_train            # clean start (default)
 ```
 
-The demo opens `http://127.0.0.1:47830/` in your browser. The boot animation runs
-first; training modules are initialized only after the page sends `ui_ready`.
-Initialization logs appear in the left info panel as `[INIT] ...`. Use
-`--no-browser` to suppress auto-open and `--no-ui` for headless servers.
+The default is a **clean environment**: master + web terminal only, no nodes and no
+automatic training. Choose a dataset and model location on the *Training* page and
+press Start; add nodes later from the *Deploy* page.
+
+For developer self-tests use `--test` / `-t`, which spawns 2 local workers and starts
+training immediately:
+
+```bash
+PYTHONPATH=python python3 -m mahe.demo_train --test --rounds 20
+```
+
+The browser opens `http://127.0.0.1:47830/`. The boot animation runs first; training
+modules are initialized only after the page sends `ui_ready`. Initialization logs
+appear in the left info panel as `[INIT] ...`. Use `--no-browser` to suppress
+auto-open and `--no-ui` for headless servers.
 
 Real terminal output:
 
@@ -104,7 +121,7 @@ INFO mahe.master: round=2  workers=2 eval_loss=0.2356 eval_acc=0.9140
 ...
 ```
 
-A checkpoint is written to `checkpoints/mahe_ckpt.npz` (or `~/.mahe/checkpoints/`
+A checkpoint is written to `checkpoints/mahe_model.npz` (or `~/.mahe/checkpoints/`
 in the packaged app). On Windows, replace `PYTHONPATH=python` with
 `set PYTHONPATH=%CD%\python`; everything else is identical.
 
@@ -227,9 +244,10 @@ The web terminal is served by the Python control plane on `127.0.0.1:47830` and
 opens automatically (HTML/CSS/JS, no external dependencies).
 
 ```bash
-python3 -m mahe.demo_train --role demo      # opens the browser
-python3 -m mahe.demo_train --role master    # LAN master + console
-python3 -m mahe.demo_train --role master --no-browser --no-ui   # headless
+python3 -m mahe.demo_train                    # clean start + console (default)
+python3 -m mahe.demo_train --test             # self-test: 2 local workers + auto-train
+python3 -m mahe.demo_train --no-browser       # do not open a browser
+python3 -m mahe.demo_train --no-ui            # headless server
 ```
 
 Flow:
@@ -239,12 +257,58 @@ Flow:
    C++ core, scheduler and training modules.
 3. Initialization messages appear in the left info panel as `[INIT] …`, `[WARN] …`,
    `[ERROR] …`.
-4. After initialization, a deployment panel offers LAN auto-deploy or manual scripts.
+4. After initialization, a deployment panel offers LAN auto-deploy, manual scripts,
+   or "later".
 
 The layout is an intentionally restrained eDEX-style terminal: dark background,
-hairline grid, monospace type and a single teal accent. The console shows boot
-output, the node table, loss/acc curves, an event log and the deployment view.
-Closing the browser does not affect training; reopening resyncs a full snapshot.
+hairline grid, monospace type and a single teal accent. Views: dashboard, training,
+cluster, deploy, assistant and logs. Closing the browser does not affect training;
+reopening resyncs a full snapshot.
+
+### Training page (beginner flow)
+
+Three steps:
+
+1. **Pick data** — the dropdown lists built-in and community datasets with
+   dimensions, classes, sample count, a one-line description and recommended
+   parameters. "Refresh" re-fetches the catalog.
+2. **Model location** — "Browse…" opens a native save dialog on the engine host
+   (PowerShell on Windows, osascript on macOS, zenity/kdialog on Linux); typing a
+   path also works, and missing directories are created.
+3. **Volume and parameters** — `Quick / Standard / Thorough` presets fill
+   `rounds / k_steps / batch`; you can override them. The live estimate shows
+   `total steps · samples per round · equivalent epochs` with an under-/over-training
+   hint.
+
+Model files are `.npz` (global parameter vector), saved every 5 rounds and at the end.
+
+> Definitions: rounds = parameter aggregation rounds; k_steps = mini-batches each
+> worker runs per round; equivalent epochs = global samples ÷ dataset size
+> (1–50 is a healthy range).
+
+### Datasets and the community catalog
+
+Three reproducible datasets ship in the box (three-class spiral, three-class
+Gaussians, four-class rings). All nodes regenerate the same data locally from the
+dataset descriptor, so no data files cross the network. The community catalog is
+optional: set `--community <base>` or `MAHE_COMMUNITY_URL` and the engine tries
+`<base>/catalog.json`; failures silently fall back to the built-in catalog. Entries
+must reference a locally registered generator — unknown generators are skipped
+because the engine never executes untrusted generator code.
+
+### Node group management
+
+Each node row in the cluster view has a `✕`: confirming removes that node from the
+group. The master sends `BYE` and then drops it from the scheduler; a worker built
+from this version exits on `BYE`. "Clear nodes" removes them all at once. Removed
+nodes take part in no further sharding or aggregation.
+
+### Assistant (reserved)
+
+The *Assistant* view is wired to the same command channel. Set `DEEPSEEK_API_KEY`
+and restart the engine to enable it; without a key the UI shows "disabled" and makes
+no network requests. `MAHE_DEEPSEEK_MODEL` / `MAHE_DEEPSEEK_BASE` override the model
+and endpoint.
 
 ### Sub-node deployment
 
@@ -274,8 +338,8 @@ python build.py --bundle
 
 The installer runs per-user (no admin rights) and always creates a **desktop
 shortcut**; on Windows it also creates a Start Menu entry and an uninstall
-registry item. Launching the shortcut starts `mahe-engine` (default `--role demo`,
-override with `MAHE_ENGINE_ROLE=master|worker`) and opens the web terminal.
+registry item. Launching the shortcut starts `mahe-engine` (clean start by default;
+set `MAHE_ENGINE_ROLE=worker` to run it as a sub-node) and opens the web terminal.
 
 PyInstaller only produces artifacts for the host platform, so build each target on
 its own OS. Size is roughly 100–130 MB. Public macOS distribution additionally
@@ -293,13 +357,17 @@ core/
   tests/test_core.cpp   C++ unit tests (including end-to-end handshake)
 python/mahe/
   model.py              NumPy MLP (CPU-only reference backend)
+  data.py               dataset registry: descriptors, generators, volume estimate
+  community.py          community dataset catalog (configurable, falls back to built-ins)
   worker_node.py        local multi-step training, Δ upload
-  master_node.py        parameter server: weighted aggregation, eval, checkpoints
+  master_node.py        parameter server: weighted aggregation, eval, checkpoints, node removal
   web_server.py         HTTP + SSE + command channel
   webui/                static web terminal (HTML/CSS/JS)
   lan_scan.py           LAN device discovery and deployability filter
   deployer.py           GitHub source pull + remote build/deploy scripts
-  demo_train.py         demo / master / worker entry point
+  platform_dialogs.py   cross-platform native file dialog (model location)
+  agent.py              DeepSeek assistant protocol (reserved)
+  demo_train.py         default / --test / worker entry point
 packaging/
   engine_entry.py       PyInstaller entry for mahe-engine
   installer_entry.py    installer: copy files + desktop shortcuts
@@ -320,16 +388,19 @@ Coverage:
 - Weighted sharding 3:1 → 750/250
 - Task dispatch, completion, node removal
 - Master/worker handshake, token rejection, bidirectional messages, graceful shutdown
-- Web terminal: static assets, `ui_ready` handshake and `/api/status` snapshot (smoke test)
+- Web terminal: static assets, `ui_ready` handshake and `/api/status` snapshot
 
-End-to-end: `--role demo` really spawns 2 worker subprocesses and writes a checkpoint.
+End-to-end: `--test` really spawns 2 worker subprocesses, trains the requested rounds
+and writes a checkpoint. `python -m mahe.demo_train --test --no-ui --dataset
+builtin:rings4` verifies that datasets with different dimensions/classes propagate
+correctly from master to workers.
 
 ## Roadmap
 
 - **v0.1 (current)**: C++ core + AVX2/NEON kernels + Python parameter-server training +
-  local demo + web terminal + LAN deployment flow
+  web terminal + LAN deployment flow + beginner training page and dataset catalog
 - **v0.2**: real multi-machine LAN validation, checkpoint resume, int8 gradient compression
-- **v0.3**: PyTorch backend, richer web console views and control commands
+- **v0.3**: DeepSeek assistant enabled, PyTorch backend, richer web console views
 - **v0.4**: TLS, web monitoring endpoint
 
 ## Known limitations
@@ -339,6 +410,9 @@ End-to-end: `--role demo` really spawns 2 worker subprocesses and writes a check
 - Multi-machine validation is mostly local multi-process; real LAN deployment follows the guide.
 - Automatic sub-node deployment requires SSH key authentication; Windows hosts that
   only expose WinRM must use the manual PowerShell script.
+- The community catalog currently accepts generator descriptors only (each node
+  reproduces the data locally); real data-file distribution is not implemented.
+- The assistant stays disabled until `DEEPSEEK_API_KEY` is configured.
 
 ## Contributing
 

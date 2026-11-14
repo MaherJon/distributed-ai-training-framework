@@ -111,6 +111,8 @@ PYBIND11_MODULE(mahe_core, m) {
   py::class_<mahe::Scheduler>(m, "Scheduler")
       .def("nodes", &mahe::Scheduler::nodes)
       .def("alive_count", &mahe::Scheduler::alive_count)
+      // 节点移出分组：只摘除调度记录，连接仍可被 master 侧关闭
+      .def("remove_node", &mahe::Scheduler::remove_node)
       .def("weighted_split", &mahe::Scheduler::weighted_split)
       .def("create_task", &mahe::Scheduler::create_task)
       .def("assign_task", &mahe::Scheduler::assign_task)
@@ -124,6 +126,8 @@ PYBIND11_MODULE(mahe_core, m) {
       .def("start_worker", &mahe::CoreNode::start_worker)
       .def("stop", &mahe::CoreNode::stop)
       .def("is_master", &mahe::CoreNode::is_master)
+      // Worker 被 master 移出分组 / 连接断开后，用于让进程正常退出
+      .def("is_running", &mahe::CoreNode::is_running)
       .def("self_id", &mahe::CoreNode::self_id)
       .def("send_to", &mahe::CoreNode::send_to)
       .def("broadcast", &mahe::CoreNode::broadcast)

@@ -58,6 +58,7 @@ public:
   void stop();
 
   bool is_master() const { return is_master_; }
+  bool is_running() const { return running_.load(); }
   uint32_t self_id() const { return self_id_; } // Worker：Master 分配的 id
 
   // Master API

@@ -70,14 +70,20 @@ compute-weighted data parallelism, AVX2/NEON kernels, one-click packaging.*
 | 容错调度 | 心跳看门狗回收掉线节点，分片回到待派池；每轮聚合前等待 `--min-workers` |
 | SIMD 内核 | AVX2（x86-64）/ NEON（aarch64）实现梯度归约与 SGD 更新，运行时自动分发 |
 | 检查点 | 训练结束/中断落盘 `.npz`，可续训 |
+| 干净启动 | 默认不拉演示节点、不自动训练；开发者用 `--test` / `-t` 一键自测 |
+| 新手训练页 | 选数据集、预设训练量、选模型保存位置（系统原生对话框）后一键开始 |
+| 训练量估算 | 实时显示总步数、每轮样本与等效 epoch（判断欠训练/过拟合） |
+| 数据集目录 | 内置数据集 + 可配置的社区目录（`--community` / `MAHE_COMMUNITY_URL`） |
+| 节点分组管理 | 任意节点可「移出分组」，支持一键清空；被移出的 Worker 会收到 BYE 并退出 |
 | 可观测界面 | 浏览器访问 `127.0.0.1:47830`；启动字幕完成前不初始化训练；日志按 `[类型] 内容` 输出 |
 | 局域网扫描部署 | 发现在线设备并按远程管理端口筛选，确认后从 GitHub 拉取源码在子端编译 |
 | 一体化安装器 | `build.py --bundle` 生成单文件安装器，自动创建桌面快捷方式 |
 | 集群打包 | `--build-cluster` 按设备数量与系统生成 master/worker 部署包 |
+| 智能助手（预留） | DeepSeek 协议与界面入口已就位；未配置密钥时不发任何网络请求 |
 
 ## 快速开始
 
-三行命令跑起单机端到端演示（1 个 Master + 2 个 Worker 子进程）：
+先构建，再启动 Web 终端：
 
 ```bash
 python3 -m pip install numpy pybind11
@@ -85,13 +91,23 @@ python3 -m pip install numpy pybind11
 python3 build.py --test        # 构建并运行 C++ 单测（内核/协议/调度/握手）
 python3 build.py               # 构建 Python 扩展
 
-PYTHONPATH=python python3 -m mahe.demo_train --role demo --rounds 20
+PYTHONPATH=python python3 -m mahe.demo_train            # 干净启动（默认）
 ```
 
-演示会自动在浏览器打开 `http://127.0.0.1:47830/`。启动字幕播放完成后，
-前端才向 Python 控制面发送 `ui_ready`，随后训练模块开始初始化；初始化日志
-在左侧信息区按 `[INIT] 内容` 输出。`--no-browser` 可关闭自动打开浏览器，
-`--no-ui` 用于无界面的服务器场景。
+默认是**干净环境**：只有 Master 与 Web 终端，没有节点、也不会自动训练。
+在「训练」页选择数据集、模型保存位置并点击「开始训练」即可；节点可以稍后在
+「部署」页扫描局域网添加。
+
+开发者自测用 `--test` / `-t`：会自动拉起 2 个本机 Worker 子进程并立即开跑：
+
+```bash
+PYTHONPATH=python python3 -m mahe.demo_train --test --rounds 20
+```
+
+浏览器会自动打开 `http://127.0.0.1:47830/`。启动字幕播放完成后，前端才向
+Python 控制面发送 `ui_ready`，随后训练模块开始初始化；初始化日志在左侧信息区
+按 `[INIT] 内容` 输出。`--no-browser` 可关闭自动打开浏览器，`--no-ui` 用于
+无界面的服务器场景。
 
 终端实录：
 
@@ -99,7 +115,7 @@ PYTHONPATH=python python3 -m mahe.demo_train --role demo --rounds 20
 INFO mahe.master: round=1  workers=2 eval_loss=0.2816 eval_acc=0.9080
 INFO mahe.master: round=2  workers=2 eval_loss=0.2356 eval_acc=0.9140
 ...
-INFO mahe.master: 检查点已保存：checkpoints/mahe_ckpt.npz (round=20)
+INFO mahe.master: 检查点已保存：checkpoints/mahe_model.npz (round=20)
 ```
 
 Windows 用 `set PYTHONPATH=%CD%\python` 代替 `PYTHONPATH=python`，其余相同。
@@ -216,13 +232,14 @@ python3 build.py --build-cluster \
 
 ## Web 控制台
 
-Web 终端由 Python 控制面托管在 `127.0.0.1:47830`，训练启动后自动打开浏览器
+Web 终端由 Python 控制面托管在 `127.0.0.1:47830`，启动后自动打开浏览器
 （HTML/CSS/JS，无外部依赖）。
 
 ```bash
-python3 -m mahe.demo_train --role demo      # 自动打开浏览器
-python3 -m mahe.demo_train --role master    # 局域网 Master + 控制台
-python3 -m mahe.demo_train --role master --no-browser --no-ui   # 无界面
+python3 -m mahe.demo_train                    # 干净启动 + 控制台（默认）
+python3 -m mahe.demo_train --test             # 自测：2 个本地 Worker + 自动训练
+python3 -m mahe.demo_train --no-browser       # 不自动开浏览器
+python3 -m mahe.demo_train --no-ui            # 无界面（服务器场景）
 ```
 
 初始化流程：
@@ -230,11 +247,50 @@ python3 -m mahe.demo_train --role master --no-browser --no-ui   # 无界面
 1. 浏览器播放启动字幕；
 2. 播放完成后 POST `ui_ready`，后端这时才初始化 C++ 核心、调度器与训练模块；
 3. 初始化信息在左侧信息区按 `[INIT] …`、`[WARN] …`、`[ERROR] …` 输出；
-4. 初始化完成后弹出子端部署面板，可选择扫描局域网自动部署或手动脚本。
+4. 初始化完成后弹出子端部署面板，可选择扫描局域网自动部署、手动脚本或稍后处理。
 
-界面是收敛版的 eDEX 风格：深色底、细线网格、等宽字体与单一青绿强调色，
-包含启动输出、节点表、loss/acc 曲线、事件日志与部署视图。关闭浏览器不影响训练，
-重新打开会收到完整快照。
+界面是收敛版的 eDEX 风格：深色底、细线网格、等宽字体与单一青绿强调色。
+视图包括总览、训练、集群、部署、助手与日志；关闭浏览器不影响训练，重新打开
+会收到完整快照。
+
+### 训练页（新手流程）
+
+按 1→2→3 三步走：
+
+1. **选择训练数据**：下拉框列出内置数据集与社区目录，附维度、类别数、样本量、
+   一句话说明与推荐参数；「刷新」会重新拉取目录。
+2. **模型保存位置**：点「浏览…」由引擎在主机弹出系统原生「另存为」对话框
+   （Windows / macOS / Linux 分别用 PowerShell、osascript、zenity/kdialog），
+   也可以直接输入路径；目录不存在会自动创建。
+3. **训练量与参数**：`快速体验 / 标准 / 充分` 三个预设一键填充
+   `rounds / k_steps / batch`，也可以手改；下方实时估算
+   `总步数 · 每轮样本 · 等效 epoch`，并提示「偏少 / 适中 / 偏大」。
+
+训练开始后按钮自动切换到「停止训练」，状态与轮次在图上方显示。
+模型文件为 `.npz`（全局参数向量），训练中每 5 轮与结束时各保存一次。
+
+> 训练量口径：轮数 = 参数聚合次数；每轮步数 = 每个节点本地训练的 mini-batch 数；
+> 等效 epoch = 全局处理样本 ÷ 数据集大小，1~50 属正常区间。
+
+### 数据集与社区目录
+
+内置三个可复现数据集（三簇螺旋 / 三类高斯 / 四类同心环），由描述符参数在各节点
+本地生成，不传输数据文件。社区目录是可选的：设置 `--community <base>` 或环境变量
+`MAHE_COMMUNITY_URL` 后，引擎会尝试拉取 `<base>/catalog.json`；拉取失败自动回退
+到内置目录，不影响离线使用。目录条目支持的字段与内置描述符一致，未知生成器会被
+跳过（服务端不会执行来源不明的生成器）。
+
+### 节点分组管理
+
+集群页每个节点右侧有 `✕`，点击确认后即可把该节点移出当前分组：Master 先向
+Worker 发送 `BYE`，再把它从调度器摘除；正常版本的 Worker 收到 `BYE` 后会自行退出。
+「清空节点」可一次移出全部节点。被移出的节点不会参与后续分片与聚合。
+
+### 智能助手（预留）
+
+「助手」页已经接入统一命令通道。配置环境变量 `DEEPSEEK_API_KEY` 并重启引擎后即可
+对话；未配置时界面显示「待启用」，不会发出任何网络请求。可选
+`MAHE_DEEPSEEK_MODEL` / `MAHE_DEEPSEEK_BASE` 覆盖模型与服务地址。
 
 ### 子端部署
 
@@ -263,7 +319,8 @@ python build.py --bundle
 
 安装器按用户级安装（无需管理员权限），并且**一定会创建桌面快捷方式**；
 Windows 还会创建开始菜单项与卸载注册表项。双击快捷方式即启动 `mahe-engine`
-（默认 `--role demo`，可用 `MAHE_ENGINE_ROLE=master|worker` 覆盖）并打开 Web 终端。
+（默认干净启动，可在「训练」页开始；用 `MAHE_ENGINE_ROLE=worker` 可切成子端）
+并打开 Web 终端。
 
 PyInstaller 只产出本机平台产物，三平台需分别在对应系统上构建；体积约 100–130 MB。
 macOS 对外分发还需签名与公证。
@@ -280,13 +337,17 @@ core/
   tests/test_core.cpp   C++ 单元测试（含端到端握手）
 python/mahe/
   model.py              NumPy MLP（CPU-only 参考后端）
+  data.py               数据集注册表：描述符、生成器与训练量估算
+  community.py          社区数据集目录（可配置数据源，失败回退内置）
   worker_node.py        本地多步训练、Δ 回传
-  master_node.py        参数服务器：加权聚合、评估、检查点
+  master_node.py        参数服务器：加权聚合、评估、检查点、节点移出
   web_server.py         HTTP + SSE + 指令通道
   webui/                静态 Web 终端（HTML/CSS/JS）
   lan_scan.py           局域网设备发现与可部署性筛选
   deployer.py           GitHub 源码拉取与远程编译部署脚本
-  demo_train.py         demo / master / worker 入口
+  platform_dialogs.py   跨平台原生文件对话框（模型保存位置）
+  agent.py              DeepSeek 智能助手预留接口
+  demo_train.py         默认 / --test / worker 入口
 packaging/
   engine_entry.py       mahe-engine 的 PyInstaller 入口
   installer_entry.py    安装器：复制文件 + 创建桌面快捷方式
@@ -307,16 +368,18 @@ python build.py --test
 - 加权分片 3:1 → 750/250
 - 任务派发、完成、节点移除
 - Master/Worker 握手、令牌拒绝、双向消息、优雅停止
-- Web 终端：静态资源、`ui_ready` 握手与 `/api/status` 快照（冒烟）
+- Web 终端：静态资源、`ui_ready` 握手与 `/api/status` 快照
 
-端到端：`--role demo` 真实启动 2 个 Worker 子进程并落盘检查点。
+端到端：`--test` 真实启动 2 个 Worker 子进程、跑完指定轮次并落盘检查点；
+`python -m mahe.demo_train --test --no-ui --dataset builtin:rings4` 可验证不同
+维度/类别数的数据集在 Master 与 Worker 之间正确同步。
 
 ## 路线图
 
-- **v0.1（当前）**：C++ 核心 + AVX2/NEON 内核 + Python 参数服务器训练 + 本地演示 +
-  Web 终端 + 局域网子端部署流程
+- **v0.1（当前）**：C++ 核心 + AVX2/NEON 内核 + Python 参数服务器训练 +
+  Web 终端 + 局域网子端部署 + 新手训练页与数据集目录
 - **v0.2**：真实局域网多机验证、检查点恢复、int8 梯度压缩
-- **v0.3**：PyTorch 后端、更完整的 Web 视图与控制指令
+- **v0.3**：DeepSeek 智能助手正式接通、PyTorch 后端、更完整的 Web 视图
 - **v0.4**：TLS、Web 监控端
 
 ## 已知边界
@@ -324,7 +387,10 @@ python build.py --test
 - 训练后端是 NumPy MLP（CPU），尚未接 PyTorch；
 - int8 梯度压缩在设计文档中预留，尚未实现；
 - 多机验证以本机多进程为主，真实局域网需按手册组网；
-- 自动子端部署依赖 SSH 密钥认证；仅开放 WinRM 的 Windows 主机需使用手动脚本。
+- 自动子端部署依赖 SSH 密钥认证；仅开放 WinRM 的 Windows 主机需使用手动脚本；
+- 社区数据集目录当前只接受「生成器描述符」（各节点本地复现）；真实数据文件分发
+  尚未实现；
+- 智能助手在未配置 `DEEPSEEK_API_KEY` 时保持禁用。
 
 ## 参与贡献
 
