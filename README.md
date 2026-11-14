@@ -20,7 +20,7 @@ Python drives training and orchestration, and a self-contained web terminal
 
 If this project helps you, a star is appreciated.
 
-![demo](./docs/demo.gif)
+![demo](./docs/gif/demo.gif)
 
 ---
 
