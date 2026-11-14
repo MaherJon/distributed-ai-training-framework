@@ -34,8 +34,10 @@
     </div>
     <nav class="menu" id="menu">
       <button class="nav-item active" data-view="dashboard">总览</button>
+      <button class="nav-item" data-view="train">训练</button>
       <button class="nav-item" data-view="cluster">集群</button>
       <button class="nav-item" data-view="deploy">部署</button>
+      <button class="nav-item" data-view="agent">助手</button>
       <button class="nav-item" data-view="logs">日志</button>
     </nav>
     <div class="top-right">
@@ -82,7 +84,10 @@
             </div>
           </div>
           <div class="panel">
-            <div class="panel-head"><span>CLUSTER NODES</span><span id="node-badge" class="dim">0</span></div>
+            <div class="panel-head">
+              <span>CLUSTER NODES</span>
+              <span id="node-badge" class="dim">0</span>
+            </div>
             <div id="node-list" class="node-list"></div>
           </div>
         </div>
@@ -94,19 +99,97 @@
           <div class="panel">
             <div class="panel-head"><span>QUICK ACTIONS</span></div>
             <div class="actions">
-              <button id="btn-scan" class="btn">扫描局域网</button>
+              <button id="btn-go-train" class="btn">开始训练</button>
+              <button id="btn-scan" class="btn ghost">扫描局域网</button>
               <button id="btn-manual" class="btn ghost">手动部署</button>
               <button id="btn-stop" class="btn danger ghost">停止训练</button>
             </div>
-            <p class="hint">扫描仅限私有网段；自动部署需要目标机开放 SSH 并配置免密登录。</p>
+            <p class="hint">默认是干净环境：没有节点、也不会自动开跑。先到「训练」页选数据与保存位置。</p>
           </div>
+        </div>
+      </section>
+
+      <!-- 训练 -->
+      <section id="view-train" class="view hidden">
+        <div class="grid">
+          <div class="panel">
+            <div class="panel-head">
+              <span>1 · 选择训练数据</span>
+              <span id="community-badge" class="dim">内置目录</span>
+            </div>
+            <div class="form">
+              <label class="field">
+                <span>数据集</span>
+                <div class="row">
+                  <select id="dataset-select"></select>
+                  <button id="btn-refresh-datasets" class="btn ghost">刷新</button>
+                </div>
+              </label>
+              <div id="dataset-detail" class="dataset-detail"></div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-head">
+              <span>2 · 模型保存位置</span>
+              <span class="dim">.npz</span>
+            </div>
+            <div class="form">
+              <label class="field">
+                <span>保存到</span>
+                <div class="row">
+                  <input id="model-path" placeholder="点击“浏览…”选择，或直接输入路径">
+                  <button id="btn-pick-path" class="btn ghost">浏览…</button>
+                </div>
+              </label>
+              <p class="hint">训练结束会自动保存；过程中每 5 轮覆盖保存一次。</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <span>3 · 训练量与参数</span>
+            <span id="train-state-text" class="dim">未开始</span>
+          </div>
+          <div class="preset-row">
+            <button class="preset" data-preset="quick">快速体验</button>
+            <button class="preset active" data-preset="normal">标准</button>
+            <button class="preset" data-preset="deep">充分</button>
+          </div>
+          <div class="param-grid">
+            <label class="field"><span>轮数 rounds</span>
+              <input id="p-rounds" type="number" min="1" max="2000" step="1"></label>
+            <label class="field"><span>每轮步数 k_steps</span>
+              <input id="p-ksteps" type="number" min="1" max="20000" step="1"></label>
+            <label class="field"><span>批大小 batch</span>
+              <input id="p-batch" type="number" min="1" max="8192" step="1"></label>
+            <label class="field"><span>学习率 lr</span>
+              <input id="p-lr" type="number" min="0.0001" max="10" step="0.01"></label>
+            <label class="field"><span>最少节点</span>
+              <input id="p-workers" type="number" min="1" max="128" step="1"></label>
+          </div>
+          <div id="estimate" class="estimate"></div>
+          <div class="actions row-actions">
+            <button id="btn-start" class="btn">开始训练</button>
+            <button id="btn-stop-2" class="btn danger ghost">停止训练</button>
+          </div>
+          <p class="hint">
+            轮数 = 参数聚合次数；每轮步数 = 每个节点本地训练的 mini-batch 数；
+            等效轮数（epoch）= 全局处理样本 ÷ 数据集大小，1~50 属于正常训练量。
+          </p>
         </div>
       </section>
 
       <!-- 集群 -->
       <section id="view-cluster" class="view hidden">
         <div class="panel fill">
-          <div class="panel-head"><span>集群节点</span><span id="cluster-summary" class="dim">0 个节点</span></div>
+          <div class="panel-head">
+            <span>集群节点</span>
+            <div class="head-tools">
+              <span id="cluster-summary" class="dim">0 个节点</span>
+              <button id="btn-clear-nodes" class="btn ghost small">清空节点</button>
+            </div>
+          </div>
           <div id="node-list-full" class="node-list full"></div>
         </div>
       </section>
@@ -137,6 +220,24 @@
         </div>
       </section>
 
+      <!-- 助手 -->
+      <section id="view-agent" class="view hidden">
+        <div class="panel fill">
+          <div class="panel-head">
+            <span>训练助手</span>
+            <span id="agent-state" class="dim">待启用</span>
+          </div>
+          <div id="agent-log" class="chat-log">
+            <div class="chat-row bot">你好，我是训练助手。配置 DeepSeek 密钥后，我可以帮你判断训练量、解释指标和排查失败原因。</div>
+          </div>
+          <div class="chat-bar">
+            <input id="agent-input" placeholder="例如：我的训练量够吗？" disabled>
+            <button id="btn-agent" class="btn" disabled>发送</button>
+          </div>
+          <p class="hint" id="agent-hint">设置环境变量 DEEPSEEK_API_KEY 并重启引擎后启用。</p>
+        </div>
+      </section>
+
       <!-- 日志 -->
       <section id="view-logs" class="view hidden">
         <div class="panel fill">
@@ -157,6 +258,7 @@
     </div>
     <p class="modal-text">
       训练模块已完成初始化。可以扫描局域网自动部署子端，也可以手动执行脚本。
+      单机使用可直接关闭本窗口，在「训练」页开始。
     </p>
     <div class="choice-row">
       <button id="choice-scan" class="btn">扫描局域网并部署</button>

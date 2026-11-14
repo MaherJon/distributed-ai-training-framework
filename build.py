@@ -450,8 +450,8 @@ def assemble_app(engine_dir: Path) -> Path:
     (APP_DIR / "README.txt").write_text(
         "MAHE 分布式 AI 训练终端\n"
         "启动：mahe-engine/mahe-engine（Windows 为 mahe-engine.exe）\n"
-        "默认以 demo 角色运行并自动打开浏览器；\n"
-        "可用环境变量 MAHE_ENGINE_ROLE=master|worker 切换角色。\n",
+        "默认干净启动：打开 Web 终端，在「训练」页选择数据与模型位置后开始；\n"
+        "自测可加 --test；可用环境变量 MAHE_ENGINE_ROLE=worker 作为子端运行。\n",
         encoding="utf-8",
     )
     log(f"安装载荷：{APP_DIR.relative_to(ROOT)}")

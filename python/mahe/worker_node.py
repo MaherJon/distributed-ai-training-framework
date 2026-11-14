@@ -33,13 +33,23 @@ class WorkerNode:
         self.hidden = hidden
         self.seed = seed
         self.stop_flag = False
+        self._dataset_sig = ""
+        self._dataset: tuple[np.ndarray, np.ndarray] | None = None
         core.set_message_handler(self._on_message)
+
+    def _dataset_for(self, spec) -> tuple[np.ndarray, np.ndarray]:
+        """按任务下发的描述符生成（并缓存）本地数据集。"""
+        sig = data_mod.dumps(spec) if isinstance(spec, dict) else str(spec)
+        if self._dataset is None or sig != self._dataset_sig:
+            self._dataset = data_mod.make(spec)
+            self._dataset_sig = sig
+        return self._dataset
 
     # ---- 本地多步训练（FedAvg 式，返回 Δ 与本地 loss）----
     def train_local(self, params_vec: np.ndarray, X, y, k_steps: int,
-                    batch: int, lr: float) -> tuple[np.ndarray, float]:
-        model = MLP(data_mod.N_FEATURES, self.hidden, data_mod.N_CLASSES,
-                    seed=self.seed)
+                    batch: int, lr: float, n_features: int = 2,
+                    n_classes: int = 3) -> tuple[np.ndarray, float]:
+        model = MLP(n_features, self.hidden, n_classes, seed=self.seed)
         model.load_vector(params_vec)
         before = model.to_vector()
         n = X.shape[0]
@@ -74,13 +84,15 @@ class WorkerNode:
         offset, length = meta["shard_offset"], meta["shard_len"]
         params = wire.blob_to_vec(blob)
 
-        X, y = data_mod.make_dataset()
+        spec = data_mod.normalize(meta.get("dataset"))
+        X, y = self._dataset_for(spec)
         Xs, ys = data_mod.shard(X, y, offset, length)
 
         t0 = time.perf_counter()
         delta, loss = self.train_local(
             params, Xs, ys,
             k_steps=meta["k_steps"], batch=meta["batch"], lr=meta["lr"],
+            n_features=spec["n_features"], n_classes=spec["n_classes"],
         )
         dt = time.perf_counter() - t0
         log.info(

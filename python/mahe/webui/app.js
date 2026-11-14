@@ -18,6 +18,13 @@
     error: "ERROR",
   };
 
+  // 训练预设：只改训练量相关的三项，学习率与最少节点保持用户设置
+  const PRESETS = {
+    quick: { rounds: 10, k_steps: 10, batch: 64 },
+    normal: { rounds: 20, k_steps: 20, batch: 64 },
+    deep: { rounds: 40, k_steps: 30, batch: 128 },
+  };
+
   const state = {
     status: "booting",
     kernel: "",
@@ -33,6 +40,12 @@
     scanning: false,
     choiceShown: false,
     scriptPlatform: "posix",
+    settings: {},
+    datasets: [],
+    community: {},
+    train: { running: false, rounds_total: 0 },
+    agent: { enabled: false },
+    preset: "normal",
   };
 
   let linkOpen = false;
@@ -47,8 +60,14 @@
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return res.json();
+    let data = {};
+    try {
+      data = await res.json();
+    } catch (_) {
+      data = {};
+    }
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    return data;
   }
 
   function nowText() {
@@ -170,12 +189,35 @@
       case "node_dead":
         upsertNode(ev, false);
         break;
+      case "node_removed":
+        removeNode(ev.id);
+        break;
       case "train_start":
+        state.train = { running: true, rounds_total: ev.rounds || 0 };
         setStatus("training");
+        renderTrainState();
         addEvent("[TRAIN] 开始训练");
         break;
       case "train_end":
+        state.train.running = false;
+        renderTrainState();
         addEvent("[TRAIN] 训练结束");
+        break;
+      case "train_state":
+        state.train = {
+          running: !!ev.running,
+          rounds_total: ev.rounds_total || state.train.rounds_total,
+        };
+        renderTrainState();
+        break;
+      case "settings":
+        applySettings(ev.settings || {}, false);
+        break;
+      case "datasets":
+        applyDatasets(ev.datasets || [], ev.community || {});
+        break;
+      case "agent":
+        applyAgent(ev.agent || ev);
         break;
       case "app_ready":
         onAppReady(ev);
@@ -211,6 +253,12 @@
     (snap.devices || []).forEach((d) => state.devices.set(d.ip, d));
     renderDevices();
 
+    applySettings(snap.settings || {});
+    applyDatasets(snap.datasets || [], snap.community || {});
+    state.train = snap.train || { running: false, rounds_total: 0 };
+    renderTrainState();
+    applyAgent(snap.agent || {});
+
     // 重连快照只补最近的信息，避免重复堆积
     const stream = $("#info-stream");
     stream.innerHTML = "";
@@ -223,7 +271,7 @@
 
     // 页面在训练模块初始化完成后才打开时，也补弹部署面板
     if (snap.ui_ready && !state.choiceShown &&
-        ["ready", "training"].includes(snap.status)) {
+        ["ready", "training", "done"].includes(snap.status)) {
       state.choiceShown = true;
       openModal("modal-choice");
     }
@@ -234,6 +282,7 @@
     const pill = $("#status-pill");
     pill.textContent = STATUS_TEXT[state.status] || state.status.toUpperCase();
     pill.className = `pill ${state.status}`;
+    renderTrainState();
   }
 
   // ---------------- 信息流 / 事件日志 ----------------
@@ -286,6 +335,7 @@
     if (state.rounds.length > 300) state.rounds.shift();
     renderMetrics();
     drawChart();
+    renderTrainState();
     addEvent(
       `[ROUND] ${r.round} · workers=${r.workers} · loss=${fmt(r.eval_loss)} · acc=${fmt(r.eval_acc)}`
     );
@@ -322,6 +372,36 @@
     addEvent(`[NODE] ${alive ? "入网" : "离线"} · ${ev.name || `node-${id}`}`);
   }
 
+  function removeNode(id) {
+    const nid = Number(id);
+    if (!state.nodes.has(nid)) return;
+    state.nodes.delete(nid);
+    renderNodes();
+    renderMetrics();
+    addEvent(`[NODE] 移出分组 · node-${nid}`);
+  }
+
+  async function kickNode(id) {
+    if (!window.confirm(`把 node-${id} 移出当前分组？该节点会收到退出指令。`)) return;
+    try {
+      await post({ cmd: "kick_node", id });
+      removeNode(id);
+      addInfo("NODE", `已请求移出 node-${id}`);
+    } catch (err) {
+      addInfo("ERROR", `移出失败：${err.message}`);
+    }
+  }
+
+  async function clearNodes() {
+    if (!window.confirm("清空当前分组的全部节点？")) return;
+    try {
+      await post({ cmd: "clear_nodes" });
+      addInfo("NODE", "已请求清空节点");
+    } catch (err) {
+      addInfo("ERROR", `清空失败：${err.message}`);
+    }
+  }
+
   function renderNodes() {
     const nodes = Array.from(state.nodes.values()).sort((a, b) => a.id - b.id);
     const alive = nodes.filter((n) => n.alive !== false).length;
@@ -335,7 +415,7 @@
       if (!nodes.length) {
         const empty = document.createElement("div");
         empty.className = "empty";
-        empty.textContent = "尚未有节点入网…";
+        empty.textContent = "尚未有节点入网：可在「部署」页扫描局域网，或手动部署子端。";
         box.appendChild(empty);
         continue;
       }
@@ -356,7 +436,12 @@
         const role = document.createElement("span");
         role.className = "node-role";
         role.textContent = n.alive === false ? "DEAD" : "ALIVE";
-        row.append(dot, name, role);
+        const kick = document.createElement("button");
+        kick.className = "icon-btn node-kick";
+        kick.textContent = "✕";
+        kick.title = "移出分组";
+        kick.addEventListener("click", () => kickNode(n.id));
+        row.append(dot, name, role, kick);
         box.appendChild(row);
       }
     }
@@ -427,6 +512,311 @@
 
     drawSeries(losses, "#e0a75a", (v) => v / maxLoss);
     drawSeries(accs, "#58e0b6", (v) => v);
+  }
+
+  // ---------------- 训练设置 ----------------
+  function applySettings(settings, full = true) {
+    state.settings = { ...state.settings, ...settings };
+    const path = $("#model-path");
+    if (path && state.settings.model_path) path.value = state.settings.model_path;
+    if (!full) return;
+
+    const map = {
+      "#p-rounds": "rounds",
+      "#p-ksteps": "k_steps",
+      "#p-batch": "batch",
+      "#p-lr": "lr",
+      "#p-workers": "min_workers",
+    };
+    for (const [sel, key] of Object.entries(map)) {
+      const el = $(sel);
+      if (el && state.settings[key] !== undefined) el.value = state.settings[key];
+    }
+    renderDatasetSelect();
+    renderEstimate();
+  }
+
+  function applyDatasets(datasets, community) {
+    state.datasets = Array.isArray(datasets) ? datasets : [];
+    state.community = community || {};
+    let badge = "内置目录";
+    if (state.community.configured) {
+      badge = state.community.count
+        ? `社区已连接 · ${state.community.count} 个`
+        : "社区目录未取到，使用内置";
+    }
+    setText("#community-badge", badge);
+    renderDatasetSelect();
+    renderDatasetDetail();
+    renderEstimate();
+  }
+
+  function renderDatasetSelect() {
+    const select = $("#dataset-select");
+    if (!select) return;
+    const current = select.value || state.settings.dataset || "";
+    select.innerHTML = "";
+    if (!state.datasets.length) {
+      const opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = "目录加载中…";
+      select.appendChild(opt);
+      select.disabled = true;
+      return;
+    }
+    select.disabled = false;
+    for (const ds of state.datasets) {
+      const opt = document.createElement("option");
+      opt.value = ds.id;
+      const tag = ds.source === "community" ? "社区" : "内置";
+      opt.textContent = `${ds.name} · ${ds.n_classes} 类 / ${ds.size} 样本（${tag}）`;
+      select.appendChild(opt);
+    }
+    const keep = current || state.settings.dataset;
+    if (keep && state.datasets.some((d) => d.id === keep)) select.value = keep;
+  }
+
+  function currentSpec() {
+    const id = $("#dataset-select")?.value || state.settings.dataset;
+    return state.datasets.find((d) => d.id === id) || state.datasets[0] || null;
+  }
+
+  function renderDatasetDetail() {
+    const box = $("#dataset-detail");
+    if (!box) return;
+    const ds = currentSpec();
+    if (!ds) {
+      box.textContent = "暂无可用数据集。";
+      return;
+    }
+    const rec = ds.recommended || {};
+    box.innerHTML = "";
+    const desc = document.createElement("p");
+    desc.className = "dataset-desc";
+    desc.textContent = ds.description || "无说明";
+    const meta = document.createElement("p");
+    meta.className = "dataset-meta";
+    const author = ds.author ? ` · 作者 ${ds.author}` : "";
+    meta.textContent =
+      `维度 ${ds.n_features} · ${ds.n_classes} 类 · ${ds.size} 样本${author}` +
+      (rec.rounds ? ` · 推荐 ${rec.rounds} 轮 × ${rec.k_steps} 步` : "");
+    box.append(desc, meta);
+  }
+
+  function readTrainForm() {
+    const num = (sel, fallback) => {
+      const v = Number($(sel).value);
+      return Number.isFinite(v) ? v : fallback;
+    };
+    return {
+      dataset: $("#dataset-select").value,
+      model_path: ($("#model-path").value || "").trim(),
+      rounds: num("#p-rounds", 20),
+      k_steps: num("#p-ksteps", 20),
+      batch: num("#p-batch", 64),
+      lr: num("#p-lr", 0.5),
+      min_workers: num("#p-workers", 1),
+    };
+  }
+
+  function estimateClient() {
+    const ds = currentSpec();
+    if (!ds) return null;
+    const f = readTrainForm();
+    const workers = Math.max(1, f.min_workers);
+    const size = Math.max(1, ds.size);
+    const perRound = Math.min(size, f.k_steps * f.batch * workers);
+    const epochs = (f.rounds * perRound) / size;
+    return {
+      epochs: Math.round(epochs * 100) / 100,
+      steps: f.rounds * f.k_steps,
+      perRound,
+      size,
+    };
+  }
+
+  function renderEstimate() {
+    const box = $("#estimate");
+    if (!box) return;
+    const est = estimateClient();
+    if (!est) {
+      box.textContent = "";
+      return;
+    }
+    let verdict = "训练量适中";
+    let cls = "ok";
+    if (est.epochs < 1) {
+      verdict = "训练量偏少：模型可能还没开始收敛";
+      cls = "warn";
+    } else if (est.epochs > 200) {
+      verdict = "训练量偏大：小数据集上容易过拟合";
+      cls = "warn";
+    } else if (est.epochs > 50) {
+      verdict = "训练量充足：留意验证指标是否还在提升";
+      cls = "ok";
+    }
+    box.className = `estimate ${cls}`;
+    box.textContent =
+      `总步数 ${est.steps} · 每轮处理 ${est.perRound} 样本 · ` +
+      `等效 ${est.epochs} epoch（数据集 ${est.size} 样本）—— ${verdict}`;
+  }
+
+  function renderTrainState() {
+    const running = state.train.running;
+    const last = state.rounds[state.rounds.length - 1];
+    const done = last ? last.round : 0;
+    const total = state.train.rounds_total || 0;
+    setText("#train-state-text",
+      running ? `训练中 ${done}${total ? ` / ${total}` : ""} 轮` : "未运行");
+    for (const id of ["#btn-start"]) {
+      const btn = $(id);
+      if (btn) btn.disabled = running;
+    }
+    for (const id of ["#btn-stop", "#btn-stop-2"]) {
+      const btn = $(id);
+      if (btn) btn.disabled = !running;
+    }
+  }
+
+  async function startTraining() {
+    const form = readTrainForm();
+    if (!form.model_path) {
+      addInfo("WARN", "请先选择模型保存位置");
+      switchView("train");
+      return;
+    }
+    const spec = currentSpec();
+    if (spec) form.dataset = spec;
+    try {
+      const res = await post({ cmd: "start_training", ...form });
+      if (res.ok === false) {
+        addInfo("ERROR", res.error || "启动训练失败");
+        return;
+      }
+      state.train.running = true;
+      state.train.rounds_total = form.rounds;
+      setStatus("training");
+      renderTrainState();
+      addInfo("TRAIN", "训练指令已下发");
+      switchView("dashboard");
+    } catch (err) {
+      addInfo("ERROR", `启动训练失败：${err.message}`);
+    }
+  }
+
+  async function stopTraining() {
+    try {
+      await post({ cmd: "stop_training" });
+    } catch (err) {
+      addInfo("ERROR", `停止训练失败：${err.message}`);
+    }
+  }
+
+  async function pickModelPath() {
+    const btn = $("#btn-pick-path");
+    if (btn) btn.disabled = true;
+    try {
+      const res = await post({ cmd: "pick_model_path",
+                               current: $("#model-path").value.trim() });
+      if (res.path) {
+        $("#model-path").value = res.path;
+        state.settings.model_path = res.path;
+        addInfo("UI", `已选择模型保存位置：${res.path}`, false);
+      }
+    } catch (err) {
+      addInfo("WARN", `无法打开文件对话框：${err.message}（可直接输入路径）`);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  async function refreshDatasets() {
+    const btn = $("#btn-refresh-datasets");
+    if (btn) btn.disabled = true;
+    try {
+      const res = await post({ cmd: "refresh_datasets" });
+      if (res.ok === false) {
+        addInfo("WARN", res.error || "目录刷新失败");
+        return;
+      }
+      applyDatasets(res.datasets || [], res.community || {});
+      addInfo("INFO", `数据集目录已刷新：${(res.datasets || []).length} 个`);
+    } catch (err) {
+      addInfo("ERROR", `目录刷新失败：${err.message}`);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  function applyPreset(name) {
+    const preset = PRESETS[name];
+    if (!preset) return;
+    state.preset = name;
+    $("#p-rounds").value = preset.rounds;
+    $("#p-ksteps").value = preset.k_steps;
+    $("#p-batch").value = preset.batch;
+    $$(".preset").forEach((b) =>
+      b.classList.toggle("active", b.dataset.preset === name)
+    );
+    renderEstimate();
+  }
+
+  // ---------------- 智能助手 ----------------
+  function applyAgent(info) {
+    state.agent = info || {};
+    const enabled = !!state.agent.enabled;
+    const input = $("#agent-input");
+    const btn = $("#btn-agent");
+    if (input) {
+      input.disabled = !enabled;
+      input.placeholder = enabled
+        ? "例如：我的训练量够吗？"
+        : "智能助手待启用";
+    }
+    if (btn) btn.disabled = !enabled;
+    setText("#agent-state", enabled
+      ? `已启用 · ${state.agent.model || "deepseek"}`
+      : "待启用");
+    setText("#agent-hint", state.agent.hint ||
+      "设置环境变量 DEEPSEEK_API_KEY 并重启引擎后启用。");
+  }
+
+  function appendChat(role, text) {
+    const box = $("#agent-log");
+    if (!box) return;
+    const row = document.createElement("div");
+    row.className = `chat-row ${role}`;
+    row.textContent = text;
+    box.appendChild(row);
+    box.scrollTop = box.scrollHeight;
+  }
+
+  async function sendAgent() {
+    const input = $("#agent-input");
+    const text = (input.value || "").trim();
+    if (!text) return;
+    input.value = "";
+    appendChat("user", text);
+    const btn = $("#btn-agent");
+    if (btn) btn.disabled = true;
+    try {
+      const history = Array.from($$("#agent-log .chat-row"))
+        .slice(-9, -1)
+        .map((el) => ({
+          role: el.classList.contains("user") ? "user" : "assistant",
+          content: el.textContent,
+        }));
+      const res = await post({ cmd: "agent_ask", text, history });
+      if (res.ok === false) {
+        appendChat("bot error", res.error || "助手暂不可用");
+        return;
+      }
+      appendChat("bot", res.reply || "（空回复）");
+    } catch (err) {
+      appendChat("bot error", `请求失败：${err.message}`);
+    } finally {
+      if (btn && state.agent.enabled) btn.disabled = false;
+    }
   }
 
   // ---------------- 扫描 / 部署 ----------------
@@ -662,6 +1052,7 @@
       b.classList.toggle("active", b.dataset.view === name)
     );
     if (name === "dashboard") drawChart();
+    if (name === "train") renderEstimate();
   }
 
   function openModal(id) {
@@ -699,12 +1090,30 @@
     $("#btn-deploy").addEventListener("click", deploySelected);
     $("#btn-copy").addEventListener("click", copyScript);
     $("#btn-download").addEventListener("click", downloadScript);
-    $("#btn-stop").addEventListener("click", async () => {
-      try {
-        await post({ cmd: "stop_training" });
-      } catch (err) {
-        addInfo("ERROR", `停止训练失败：${err.message}`);
-      }
+    for (const id of ["#btn-stop", "#btn-stop-2"]) {
+      const btn = $(id);
+      if (btn) btn.addEventListener("click", stopTraining);
+    }
+
+    $("#btn-go-train").addEventListener("click", () => switchView("train"));
+    $("#btn-start").addEventListener("click", startTraining);
+    $("#btn-pick-path").addEventListener("click", pickModelPath);
+    $("#btn-refresh-datasets").addEventListener("click", refreshDatasets);
+    $("#btn-clear-nodes").addEventListener("click", clearNodes);
+    $("#dataset-select").addEventListener("change", () => {
+      renderDatasetDetail();
+      renderEstimate();
+    });
+    $$(".preset").forEach((btn) =>
+      btn.addEventListener("click", () => applyPreset(btn.dataset.preset))
+    );
+    for (const sel of ["#p-rounds", "#p-ksteps", "#p-batch", "#p-lr", "#p-workers"]) {
+      $(sel).addEventListener("input", renderEstimate);
+    }
+
+    $("#btn-agent").addEventListener("click", sendAgent);
+    $("#agent-input").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") sendAgent();
     });
 
     $$(".tab").forEach((tab) =>
@@ -732,6 +1141,7 @@
     connect();
     renderNodes();
     renderDevices();
+    renderTrainState();
     runBoot();
   });
 })();

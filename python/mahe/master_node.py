@@ -50,22 +50,20 @@ class ParameterServer:
 
 
 class MasterNode:
-    def __init__(self, core, hidden: int = 32, on_event=None):
+    def __init__(self, core, hidden: int = 32, dataset=None, on_event=None):
         import mahe
 
         self.core = core
         self.mahe = mahe
         self.hidden = hidden
         self.on_event = on_event or (lambda ev: None)
-
-        model = MLP(data_mod.N_FEATURES, hidden, data_mod.N_CLASSES, seed=0)
-        self.ps = ParameterServer(model.vector_size())
-        self.ps.params = model.to_vector()
+        self.dataset = data_mod.normalize(dataset)
 
         self._lock = threading.Lock()
         self._cv = threading.Condition(self._lock)
         self._round_deltas: dict[int, list[tuple[int, np.ndarray, dict]]] = {}
         self.stop_flag = False
+        self._build_model()
 
         core.set_message_handler(self._on_message)
         core.set_on_node_join(lambda n: self._emit({
@@ -75,6 +73,54 @@ class MasterNode:
         core.set_on_node_dead(lambda n: self._emit({
             "type": "node_dead", "id": n.id, "name": n.name,
         }))
+
+    def _build_model(self) -> None:
+        model = MLP(self.dataset["n_features"], self.hidden,
+                    self.dataset["n_classes"], seed=0)
+        self.ps = ParameterServer(model.vector_size())
+        self.ps.params = model.to_vector()
+
+    def set_dataset(self, dataset) -> bool:
+        """切换数据集；维度变化会重建参数（返回是否发生重建）。"""
+        spec = data_mod.normalize(dataset)
+        if spec["id"] == self.dataset["id"] and spec["params"] == self.dataset["params"]:
+            return False
+        dims_changed = (spec["n_features"] != self.dataset["n_features"] or
+                        spec["n_classes"] != self.dataset["n_classes"])
+        self.dataset = spec
+        if dims_changed:
+            with self._cv:
+                self._round_deltas.clear()
+            self._build_model()
+        return True
+
+    def kick(self, node_id: int) -> bool:
+        """把节点移出分组：先通知其退出，再从调度器摘除。"""
+        mt = self.mahe.mahe_core.MsgType
+        msg = self.mahe.mahe_core.Message()
+        msg.type = mt.BYE
+        msg.payload = b"reason=kicked\n"
+        self.core.send_to(node_id, msg)
+        try:
+            self.core.scheduler().remove_node(node_id)
+        except AttributeError:
+            pass
+        self._emit({"type": "node_removed", "id": node_id})
+        return True
+
+    def clear_nodes(self) -> list[int]:
+        ids = [n.id for n in self.core.scheduler().nodes()]
+        for nid in ids:
+            self.kick(nid)
+        return ids
+
+    def nodes(self) -> list[dict]:
+        return [
+            {"id": n.id, "name": n.name, "cores": n.cores,
+             "score": n.score, "alive": n.alive}
+            for n in self.core.scheduler().nodes()
+        ]
+
 
     def _emit(self, ev: dict) -> None:
         try:
@@ -124,7 +170,7 @@ class MasterNode:
         round_id = self.ps.round + 1
 
         # 加权分片
-        split = sched.weighted_split(data_mod.DATASET_SIZE)
+        split = sched.weighted_split(int(self.dataset["size"]))
         split = {nid: sz for nid, sz in split.items()
                  if any(n.id == nid for n in nodes)}
         if not split:
@@ -147,6 +193,7 @@ class MasterNode:
                     "k_steps": k_steps,
                     "batch": batch,
                     "lr": lr,
+                    "dataset": self.dataset,
                 },
                 params_blob,
             )
@@ -185,10 +232,12 @@ class MasterNode:
 
         self.ps.aggregate(deltas)
 
-        # 评估（固定留出集）
-        X, y = data_mod.make_dataset()
-        Xe, ye = X[:1000], y[:1000]
-        model = MLP(data_mod.N_FEATURES, self.hidden, data_mod.N_CLASSES, seed=0)
+        # 评估（固定留出集：数据集前 1000 条）
+        X, y = data_mod.make(self.dataset)
+        take = min(1000, len(y))
+        Xe, ye = X[:take], y[:take]
+        model = MLP(self.dataset["n_features"], self.hidden,
+                    self.dataset["n_classes"], seed=0)
         model.load_vector(self.ps.params)
         acc = model.accuracy(Xe, ye)
         loss, _ = model.loss_and_grads(Xe, ye)
@@ -210,13 +259,22 @@ class MasterNode:
 
     def train(self, rounds: int, k_steps: int, batch: int, lr: float,
               min_workers: int = 1, ckpt_path: str | None = None,
-              ckpt_every: int = 5) -> None:
-        log.info("等待 worker 入网（≥%d）…", min_workers)
-        if not self.wait_workers(min_workers):
-            log.error("无 worker 入网，退出")
+              ckpt_every: int = 5, dataset=None,
+              wait_timeout_s: float = 300.0) -> None:
+        self.stop_flag = False
+        if dataset is not None and self.set_dataset(dataset):
+            log.info("数据集：%s（%d 类 · %d 样本）", self.dataset["name"],
+                     self.dataset["n_classes"], self.dataset["size"])
+        log.info("等待 worker 入网（≥%d，最多 %.0fs）…", min_workers,
+                 wait_timeout_s)
+        if not self.wait_workers(min_workers, timeout_s=wait_timeout_s):
+            log.error("无 worker 入网，退出本轮训练")
+            self._emit({"type": "train_end", "round": self.ps.round,
+                        "reason": "no_worker"})
             return
         time.sleep(1.0)  # 等 worker 装好消息处理器，避免首轮任务被丢弃
-        self._emit({"type": "train_start", "rounds": rounds})
+        self._emit({"type": "train_start", "rounds": rounds,
+                    "dataset": self.dataset["name"]})
         for _ in range(rounds):
             if self.stop_flag:
                 break

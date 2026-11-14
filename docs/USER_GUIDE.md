@@ -13,9 +13,9 @@ MAHE 适合“有机器、没 GPU 集群”的场景：
 - 想验证分布式训练（参数服务器、数据并行、通信压缩）的教学与实验；
 - 需要一个可以打包分发的桌面端训练演示程序。
 
-当前版本（v0.1）的训练后端是 **NumPy 实现的 MLP**，演示数据是确定性生成的
-2 维 3 类合成分类集（6000 样本）。它不是生产级大模型训练器，PyTorch 后端在
-[v0.3 路线图](../DESIGN.md#12-路线图)。
+当前版本（v0.1）的训练后端是 **NumPy 实现的 MLP**，内置三套确定性生成的 2 维
+合成分类集（三簇螺旋 / 三类高斯 / 四类同心环），可在「训练」页切换。它不是生产级
+大模型训练器，PyTorch 后端在 [v0.3 路线图](../DESIGN.md#12-路线图)。
 
 ## 2. 系统要求
 
@@ -128,25 +128,34 @@ python -c "import mahe; print(mahe.mahe_core.kernel_impl())"
 
 ## 5. 五分钟单机演示
 
-`--role demo` 会在当前进程跑 Master，并拉起 2 个 Worker 子进程：
+默认启动是**干净环境**：只跑 Master 与 Web 控制台，不会自动拉起节点，也不会
+自动训练。打开控制台后：
+
+1. 进入「训练」页；
+2. 选择一个数据集（内置三个可选）；
+3. 确认或修改模型保存位置；
+4. 点「快速体验」或「标准」，再点「开始训练」。
+
+单机想立刻跑通链路，可以直接用开发者自测模式（自动拉起 2 个 Worker 并开跑）：
 
 ```bash
-PYTHONPATH=python python3 -m mahe.demo_train --role demo --rounds 20
+PYTHONPATH=python python3 -m mahe.demo_train --test --rounds 20
 ```
 
 Windows：
 
 ```bat
 set PYTHONPATH=%CD%\python
-python -m mahe.demo_train --role demo --rounds 20
+python -m mahe.demo_train --test --rounds 20
 ```
 
-训练结束后检查点写到 `checkpoints/mahe_ckpt.npz`。每轮日志包含 `workers`、
-`eval_loss`、`eval_acc`。
+训练结束后检查点写到你在界面里指定的路径（默认 `checkpoints/mahe_model.npz`）。
+每轮日志包含 `workers`、`eval_loss`、`eval_acc`。
 
 命令会同时启动 Web 控制台并自动打开 `http://127.0.0.1:47830/`。界面先播放启动
 字幕，播放完成后才通知后端初始化训练模块；初始化信息在左上角菜单栏下方的信息区
-按 `[INIT] 内容` 输出。`--no-browser` 可关闭自动打开，`--no-ui` 用于服务器场景。
+按 `[INIT] 内容` 输出。`--no-browser` 可关闭自动打开，`--no-ui` 用于服务器场景
+（无界面时按命令行参数直接训练）。
 
 ## 6. 局域网组网
 
@@ -155,10 +164,15 @@ python -m mahe.demo_train --role demo --rounds 20
 ### 6.1 启动 Master
 
 ```bash
-PYTHONPATH=python python3 -m mahe.demo_train --role master --min-workers 2 --rounds 30
+PYTHONPATH=python python3 -m mahe.demo_train --min-workers 2
 ```
 
-`--min-workers` 是 Master 每轮聚合前等待的最少 Worker 数。单机测试可设为 1。
+`--min-workers` 是 Master 每轮聚合前等待的最少 Worker 数，也是「训练」页里
+「最少节点」的默认值；默认 1，单机测试可用。
+
+Master 启动后是干净环境，**不会自动训练**：等 Worker 入网后，在控制台「训练」页
+点「开始训练」。若先点开始而节点不够，信息流会提示“等待 worker 入网”，最多等
+`--wait-timeout` 秒（默认 300），期间可随时点“停止训练”。
 
 ### 6.2 启动 Worker
 
@@ -241,13 +255,13 @@ build/cluster/device_01_worker_linux-aarch64/
 ## 7. Web 控制台
 
 控制台是浏览器中的独立页面，由 Master 的 Python 控制面托管在
-`http://127.0.0.1:47830/`，启动训练后会自动打开。关闭或刷新浏览器都不影响训练，
+`http://127.0.0.1:47830/`，启动后会自动打开。关闭或刷新浏览器都不影响训练，
 重新打开会先收到完整状态快照。
 
 | 角色 | 是否启动 Web 控制台 |
 |---|---|
-| `demo` | 是（默认打开浏览器） |
-| `master` | 是（默认打开浏览器） |
+| 默认（Master） | 是（默认打开浏览器） |
+| `--test` | 是（额外拉起 2 个本地 Worker 并自动训练） |
 | `worker` | 否 |
 
 ### 7.1 初始化流程
@@ -255,7 +269,8 @@ build/cluster/device_01_worker_linux-aarch64/
 1. 页面先播放启动字幕（终端自检序列）；
 2. 字幕播放完毕，前端 POST `ui_ready` 给 Python 控制面；
 3. 控制面收到信号后才初始化 C++ 核心、调度器与训练模块；
-4. 初始化完成后弹出“子端部署”选择面板（扫描局域网 / 手动部署 / 稍后）。
+4. 随后加载数据集目录与助手状态，再弹出“子端部署”选择面板
+   （扫描局域网 / 手动部署 / 稍后）。
 
 初始化期间的所有信息都输出到左上角菜单栏下方的信息区，格式为
 `[信息类型] 内容`，例如：
@@ -264,18 +279,82 @@ build/cluster/device_01_worker_linux-aarch64/
 [UI] 控制终端已启动：http://127.0.0.1:47830/
 [INIT] 传输层就绪：TCP 47820 / UDP 47821
 [INIT] 计算内核：avx2
+[INIT] 默认数据集：三簇螺旋
+[INIT] 环境已就绪：在「训练」页选择数据集与保存位置后开始
 [INFO] round=1 workers=2 eval_loss=0.2816 eval_acc=0.9080
 ```
 
 ### 7.2 界面区域
 
 - **总览**：轮次、loss、准确率、在线节点数；loss/acc 曲线；节点表；事件日志；
-- **集群**：完整节点列表与在线数量；
+- **训练**：数据集、模型保存位置、训练量预设与参数、实时估算、开始/停止；
+- **集群**：完整节点列表、在线数量、单节点「移出」与「清空节点」；
 - **部署**：局域网设备扫描、设备筛选、自动/手动部署与部署日志；
+- **助手**：DeepSeek 对话入口（未配置密钥时显示待启用）；
 - **日志**：最近 200 条事件；
 - 右上角 `◉ LINKED` / `◌ OFFLINE` 显示事件流连接状态，断线自动重连。
 
-### 7.3 相关参数
+### 7.3 训练页怎么用
+
+1. **数据集**：下拉框显示名称、类别数与样本量；下方是一句话说明与推荐参数。
+   社区目录配置后会自动合并进列表（见 7.4）。
+2. **模型保存位置**：点「浏览…」由引擎在**主机**弹出系统原生另存为对话框。
+   浏览器无法直接拿到本地路径，所以这一步走 Python 后端；也可以手动输入。
+   目录不存在会自动创建，后缀为空时自动补 `.npz`。
+3. **训练量**：
+   - `快速体验`：10 轮 × 10 步，用来确认链路；
+   - `标准`：20 轮 × 20 步，默认；
+   - `充分`：40 轮 × 30 步、batch 128，适合四类数据。
+   估算行会实时显示 `总步数 · 每轮样本 · 等效 epoch`，并给出训练量是否偏少/偏大。
+4. 点「开始训练」。没有足够节点时会先等待；训练中按钮变为「停止训练」。
+
+> 口径：轮数 = 参数聚合次数；每轮步数 = 每个节点本地跑的 mini-batch 数；
+> 等效 epoch = 全局处理样本 ÷ 数据集大小。1~50 属正常，`<1` 基本学不到东西，
+> `>200` 在小数据集上容易过拟合。
+
+### 7.4 数据集与社区目录
+
+内置数据集由描述符参数在各节点本地确定性生成，不传输数据文件：
+
+| id | 名称 | 类别 | 样本 | 用途 |
+|---|---|---|---|---|
+| `builtin:spiral3` | 三簇螺旋 | 3 | 6000 | 入门，非线性可分 |
+| `builtin:gauss3` | 高斯团（三类） | 3 | 6000 | 最简，验证集群与链路 |
+| `builtin:rings4` | 同心环（四类） | 4 | 8000 | 稍难，观察更多轮次 |
+
+配置社区目录（可选）：
+
+```bash
+PYTHONPATH=python python3 -m mahe.demo_train --community https://example.com/mahe
+# 或
+export MAHE_COMMUNITY_URL=https://example.com/mahe
+```
+
+引擎会请求 `<base>/catalog.json`（也接受完整 `.json` 地址），格式为数组或
+`{"datasets": [...]}`；条目字段与内置描述符一致。拉取失败会静默回退内置目录，
+未知生成器条目会被跳过。目录里点「刷新」可立即重试。
+
+### 7.5 节点分组管理
+
+- 每个节点右侧的 `✕`：确认后把该节点移出分组。Master 先发 `BYE`，再摘除调度
+  记录；用当前版本构建的 Worker 收到 `BYE` 会自行退出。
+- 「清空节点」：一次性移出全部节点。
+- 移出只影响当前分组/调度，不会卸载子端程序；需要时重新部署或重启 Worker 入网。
+
+### 7.6 智能助手
+
+「助手」页用于后续接入 DeepSeek：未配置密钥时输入框禁用并显示原因，不会发起
+任何外部请求。启用方式：
+
+```bash
+export DEEPSEEK_API_KEY=sk-...
+PYTHONPATH=python python3 -m mahe.demo_train
+```
+
+可选 `MAHE_DEEPSEEK_MODEL`（默认 `deepseek-chat`）与 `MAHE_DEEPSEEK_BASE`
+（默认 `https://api.deepseek.com`）。密钥只在引擎进程内读取，不会下发到前端。
+
+### 7.7 相关参数
 
 | 参数 | 说明 |
 |---|---|
@@ -283,6 +362,7 @@ build/cluster/device_01_worker_linux-aarch64/
 | `--no-browser` | 不自动打开浏览器 |
 | `--no-ui` | 不启动 Web 控制台（服务器/无桌面环境） |
 | `--ui-timeout` | 等待界面就绪的秒数，超时后按无界面模式继续 |
+| `--wait-timeout` | 开始训练后等待节点入网的最长秒数，默认 300 |
 
 ## 8. 安装器
 
@@ -296,11 +376,11 @@ build/cluster/device_01_worker_linux-aarch64/
 - **自动创建桌面快捷方式**；
 - Windows 额外创建开始菜单项与卸载注册表项。
 
-双击桌面快捷方式即启动 `mahe-engine` 并打开 Web 控制台。默认 `--role demo`
-（本机 1 Master + 2 Worker），可用环境变量切换角色：
+双击桌面快捷方式即启动 `mahe-engine` 并打开 Web 控制台。默认是**干净启动**
+（只有 Master，不自动训练）；要作为子端运行可用环境变量切换：
 
 ```powershell
-$env:MAHE_ENGINE_ROLE="master"
+$env:MAHE_ENGINE_ROLE="worker"
 ```
 
 日志：`~/.mahe/engine.log`；检查点：`~/.mahe/checkpoints/`。
@@ -336,7 +416,8 @@ python build.py --bundle
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `--role` | `demo` | `demo` / `master` / `worker` |
+| `--role` | `master` | `master` / `worker`；`demo` 等同 `--test` |
+| `-t`, `--test` | 关 | 开发者自测：拉起 2 个本地 Worker 并自动开始训练 |
 | `--master` | 空 | Worker 直连地址；空则 UDP 自动发现 |
 | `--master-port` | 47820 | Worker 连接 Master 的端口 |
 | `--name` | 空 | 节点名，默认 `worker-<pid>` |
@@ -352,13 +433,16 @@ python build.py --bundle
 | `--subnet` | 自动 | 扫描网段（CIDR），默认本机 /24 |
 | `--repo` | 内置仓库 | 子端部署源码仓库 |
 | `--branch` | `main` | 子端部署分支 |
-| `--rounds` | 20 | 通信轮数 |
-| `--k-steps` | 20 | 每轮本地训练步数 |
-| `--batch` | 64 | 本地 batch 大小 |
-| `--lr` | 0.5 | 学习率 |
+| `--community` | 空 | 社区数据集目录地址（也可用 `MAHE_COMMUNITY_URL`） |
+| `--dataset` | `builtin:spiral3` | 默认数据集 id |
+| `--rounds` | 20 | 默认通信轮数（界面里可改） |
+| `--k-steps` | 20 | 默认每轮本地训练步数 |
+| `--batch` | 64 | 默认本地 batch 大小 |
+| `--lr` | 0.5 | 默认学习率 |
 | `--hidden` | 32 | 隐藏层宽度 |
-| `--min-workers` | 1 | Master 每轮等待的最少 Worker 数 |
-| `--ckpt` | `checkpoints/mahe_ckpt.npz` | 检查点路径（冻结版默认 `~/.mahe/checkpoints/`） |
+| `--min-workers` | 1 | 每轮等待的最少 Worker 数 |
+| `--wait-timeout` | 300 | 开始训练后等待节点入网的秒数 |
+| `--ckpt` | `checkpoints/mahe_model.npz` | 默认模型保存路径（冻结版在 `~/.mahe/checkpoints/`） |
 
 `build.py` 参数：
 
@@ -374,8 +458,10 @@ python build.py --bundle
 
 ## 10. 调优建议
 
-- **通信太慢**：提高 `--k-steps`（本地多算，减少轮次通信），或增加 `--batch`。
-- **收敛不稳**：调低 `--lr`，或提高 `--min-workers` 保证每轮参与者数量。
+- **先看训练量**：训练页的估算行会给出等效 epoch；`<1` 说明还没开始收敛，
+  `>200` 在小数据集上容易过拟合，优先调 `rounds` 与 `k_steps`。
+- **通信太慢**：提高每轮步数（本地多算，减少轮次通信），或增加 batch。
+- **收敛不稳**：调低学习率，或提高「最少节点」保证每轮参与者数量。
 - **节点算力差异大**：MAHE 已按算力分加权分片；若差异仍明显，可让弱机只作
   Worker、强机作 Master，并适当降低总轮数观察曲线。
 - **模型更大**：提高 `--hidden`，注意 NumPy 后端是 CPU 计算，收益取决于单机算力。
@@ -401,6 +487,12 @@ python build.py --bundle
 | 扫描不到局域网设备 | 跨网段、ICMP 被拦、AP 隔离 | 填写正确 CIDR（`--subnet`）；关闭 AP 隔离；改用 `--master` 直连部署 |
 | 自动部署失败（SSH） | 目标机未开 SSH / 未配置免密 / 用户名错误 | 目标机安装并启动 SSH；`ssh-copy-id user@host`；或用“手动部署”脚本 |
 | 安装器没有创建桌面快捷方式 | PowerShell 不可用或执行策略拦截 | 在 cmd 中运行安装器查看报错；确认 `%USERPROFILE%\Desktop\MAHE.lnk`；必要时手动运行 `uninstall.ps1` 后重装 |
+| 点「浏览…」没有弹出对话框 | Linux 缺 zenity/kdialog，或引擎在无桌面会话中运行 | 安装 `zenity`（或 `kdialog`）；也可直接在输入框手填路径 |
+| 一直停在 READY、没有轮次 | 默认是干净启动，需要手动开始，且要等节点入网 | 在「训练」页点开始；单机自测改用 `--test` |
+| 「开始训练」后一直等待节点 | 没有 Worker 入网，或令牌/端口不一致 | 检查信息流的“等待 worker 入网”；核对 `--token`、47820/UDP 47821；最多等 `--wait-timeout` 秒 |
+| 节点移出后列表又出现 | 子端是旧版本，不响应 `BYE`，心跳重新注册 | 用当前分支源码重新部署/重启子端 |
+| 助手页显示“待启用” | 未配置 `DEEPSEEK_API_KEY` | 设置后重启引擎；这是预期行为，不会发外部请求 |
+| 数据集下拉框为空 | 目录尚未加载或 `refresh_datasets` 失败 | 初始化完成后再看；点「刷新」；查看信息流 `[ERROR]` |
 | `--bundle` 提示缺 PyInstaller | 未安装 | `python -m pip install pyinstaller` |
 | macOS 打开应用提示“已损坏” | 未签名/公证 | 右键“打开”，或 `xattr -dr com.apple.quarantine ~/Applications/MAHE.app` |
 
@@ -417,8 +509,15 @@ python build.py --test
 
 **需要 GPU 吗？** 不需要。当前后端是 CPU NumPy MLP，GPU 不是前置条件。
 
-**能训练自己的数据吗？** v0.1 的演示数据由种子确定性生成，各节点按分片描述符
-取数，不传输数据集。接自有数据需要实现对应的数据加载与分片描述（路线图中）。
+**能训练自己的数据吗？** 目前支持“生成器描述符”形式的数据集：描述符随任务下发，
+各节点在本地确定性重建同一份数据，因此不需要传数据文件。内置了三个示例；
+社区目录可以下发更多描述符，但生成器必须是引擎已注册的类型（未知生成器会被跳过）。
+接任意自有数据文件（CSV/NPZ 分发与分片）在路线图中。
+
+**为什么默认一个节点都没有？** v0.1 起默认是干净环境，避免演示节点混进真实集群；
+需要本机自测时加 `--test`，需要真实节点时在「部署」页扫描或手动部署。
+
+**怎么把节点从分组里去掉？** 集群页节点右侧的 `✕`，或「清空节点」。
 
 **不同系统能混组集群吗？** 可以。帧协议与端口一致，各节点用各自平台的扩展；
 但版本与令牌必须一致。

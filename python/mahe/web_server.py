@@ -46,6 +46,11 @@ class UiState:
         self.nodes: dict[int, dict[str, Any]] = {}
         self.devices: list[dict[str, Any]] = []
         self.scanning = False
+        self.settings: dict[str, Any] = {}
+        self.datasets: list[dict[str, Any]] = []
+        self.community: dict[str, Any] = {}
+        self.train: dict[str, Any] = {"running": False, "rounds_total": 0}
+        self.agent: dict[str, Any] = {}
         self.ui_ready = threading.Event()
 
     def snapshot(self) -> dict[str, Any]:
@@ -61,6 +66,11 @@ class UiState:
                 "nodes": list(self.nodes.values()),
                 "devices": list(self.devices),
                 "scanning": self.scanning,
+                "settings": dict(self.settings),
+                "datasets": list(self.datasets),
+                "community": dict(self.community),
+                "train": dict(self.train),
+                "agent": dict(self.agent),
                 "ui_ready": self.ui_ready.is_set(),
                 "ui_port": self.ui_port,
             }
@@ -100,6 +110,31 @@ class UiState:
             nid = int(node.get("id") or 0)
             if nid in self.nodes:
                 self.nodes[nid]["alive"] = False
+
+    def remove_node(self, node_id: int) -> None:
+        with self._lock:
+            self.nodes.pop(int(node_id), None)
+
+    def set_settings(self, update: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            self.settings.update(update)
+            return dict(self.settings)
+
+    def set_datasets(self, datasets: list[dict[str, Any]],
+                     community: dict[str, Any] | None = None) -> None:
+        with self._lock:
+            self.datasets = list(datasets)
+            if community is not None:
+                self.community = dict(community)
+
+    def set_train(self, running: bool, rounds_total: int = 0) -> None:
+        with self._lock:
+            self.train = {"running": bool(running),
+                          "rounds_total": int(rounds_total)}
+
+    def set_agent(self, info: dict[str, Any]) -> None:
+        with self._lock:
+            self.agent = dict(info)
 
     def set_devices(self, devices: list[dict[str, Any]]) -> None:
         with self._lock:
@@ -295,6 +330,12 @@ class WebUiServer:
         self.on_deploy: Callable[[dict[str, Any]], None] | None = None
         self.on_stop: Callable[[], None] | None = None
         self.on_shutdown: Callable[[], None] | None = None
+        self.on_start_training: Callable[[dict[str, Any]], dict[str, Any]] | None = None
+        self.on_kick_node: Callable[[dict[str, Any]], None] | None = None
+        self.on_clear_nodes: Callable[[], None] | None = None
+        self.on_pick_path: Callable[[dict[str, Any]], str] | None = None
+        self.on_refresh_datasets: Callable[[], dict[str, Any]] | None = None
+        self.on_agent_ask: Callable[[dict[str, Any]], dict[str, Any]] | None = None
         self._script_provider: Callable[[str], str] | None = None
 
     # ---- 生命周期 ----
@@ -348,6 +389,10 @@ class WebUiServer:
         self.state.set_status(status)
         self.hub.publish({"type": "status", "status": status})
 
+    def set_agent(self, info: dict[str, Any]) -> None:
+        self.state.set_agent(info)
+        self.hub.publish({"type": "agent", "agent": info})
+
     def publish_training_event(self, ev: dict[str, Any]) -> None:
         t = ev.get("type")
         if t == "round":
@@ -362,7 +407,18 @@ class WebUiServer:
             })
         elif t == "node_dead":
             self.state.mark_node_dead(ev)
+        elif t == "node_removed":
+            self.state.remove_node(int(ev.get("id") or 0))
+        elif t == "train_start":
+            self.state.set_train(True, int(ev.get("rounds") or 0))
+        elif t == "train_end":
+            self.state.set_train(False)
         self.hub.publish(ev)
+
+    def publish_train_state(self, running: bool, rounds_total: int = 0) -> None:
+        self.state.set_train(running, rounds_total)
+        self.hub.publish({"type": "train_state", "running": bool(running),
+                          "rounds_total": int(rounds_total)})
 
     def publish_scan_device(self, device: dict[str, Any]) -> None:
         devices = {d["ip"]: d for d in self.state.devices}
@@ -413,6 +469,32 @@ class WebUiServer:
                 threading.Thread(target=self.on_deploy, args=(cmd,),
                                  daemon=True, name="mahe-deploy").start()
             return {"status": "deploying"}
+        if name == "start_training":
+            if self.on_start_training is None:
+                return {"ok": False, "error": "训练模块尚未初始化"}
+            return self.on_start_training(cmd)
+        if name == "kick_node":
+            node_id = int(cmd.get("id") or 0)
+            if node_id <= 0:
+                return {"ok": False, "error": "缺少节点编号"}
+            if self.on_kick_node:
+                self.on_kick_node(cmd)
+            return {"status": "ok", "id": node_id}
+        if name == "clear_nodes":
+            if self.on_clear_nodes:
+                self.on_clear_nodes()
+            return {"status": "ok"}
+        if name == "pick_model_path":
+            path = self.on_pick_path(cmd) if self.on_pick_path else ""
+            return {"path": path}
+        if name == "refresh_datasets":
+            if self.on_refresh_datasets is None:
+                return {"ok": False, "error": "目录服务未就绪"}
+            return self.on_refresh_datasets()
+        if name == "agent_ask":
+            if self.on_agent_ask is None:
+                return {"ok": False, "error": "智能助手未启用"}
+            return self.on_agent_ask(cmd)
         if name == "stop_training":
             if self.on_stop:
                 self.on_stop()

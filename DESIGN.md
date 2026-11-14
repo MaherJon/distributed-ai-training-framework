@@ -44,7 +44,9 @@ GPU 集群与租用显卡成本高昂，个人爱好者难以负担。MAHE 的�
      │  · ClusterController：建集群/节点管理/任务编排   │
      │  · Trainer：模型定义、本地多步训练、梯度产出      │
      │  · ParameterServer：加权聚合、优化器、检查点     │
+     │  · data / community：数据集描述符与社区目录      │
      │  · lan_scan / deployer：局域网扫描与子端部署     │
+     │  · platform_dialogs / agent：原生对话框与助手    │
      │  · 通过 pybind11 扩展 mahe_core 调用 C++ 核心    │
      └───────────────┬──────────────────────────────┘
                      │ pybind11（同进程，零拷贝传 NumPy buffer）
@@ -65,6 +67,16 @@ Worker 节点跑精简栈（Python worker + C++ 核心，无 UI）。Worker 只�
 前端播放完启动字幕后才 POST `ui_ready`，控制面收到信号再初始化训练链路。
 初始化日志通过 SSE 输出到界面左侧信息区，格式 `[信息类型] 内容`。
 这样避免了“界面还没准备好，后端已经广播/占用端口/开始训练”的竞态。
+
+**干净启动与训练入口**：初始化完成后只到 `ready`，不拉起演示节点、不自动训练；
+训练参数（数据集、轮数、步数、批大小、学习率、最少节点、模型保存位置）由
+「训练」页提交 `start_training` 指令后生效，训练线程可重复启动与停止。
+开发者自测用 `--test` / `-t`：初始化后自动拉起 2 个本机 Worker 并立即开跑。
+`--no-ui`（服务器场景）没有可点击的界面，直接按命令行参数训练。
+
+**节点移出**：`Scheduler::remove_node` 已暴露给 Python。Master 移出节点时先发
+`BYE` 再摘除调度记录；Worker 收到 `BYE` 后 `CoreNode` 停止，进程随
+`is_running()` 变为 false 而退出。这样分组不再是“只能加不能减”。
 
 ## 4. 应用层协议（帧格式）
 
@@ -145,21 +157,36 @@ ARM（Mac）走 NEON intrinsics 回退路径。
 ## 8. Python 层
 
 - `mahe.web_server.WebUiServer`：回环 HTTP 服务，负责静态页面、SSE 事件流、
-  JSON 指令分发与状态快照；
+  JSON 指令分发与状态快照；指令覆盖 `ui_ready`、扫描/部署、训练启停、
+  节点移出、模型路径选择、目录刷新与助手对话；
 - `mahe.master_node`：参数服务器、加权聚合（调用汇编内核）、评估与检查点；
-- `mahe.worker_node`：本地多步训练与 Δ 回传；
+  支持按任务切换数据集描述符、移出单个节点或清空节点；
+- `mahe.data`：数据集注册表。每条描述符包含 `id/name/generator/n_features/
+  n_classes/size/seed/params/recommended`，各节点本地确定性重建数据，任务负载
+  里只带描述符；同模块提供 `estimate()` 计算总步数、每轮样本与等效 epoch；
+- `mahe.community`：可配置的社区目录。读取 `--community` / `MAHE_COMMUNITY_URL`，
+  拉取 `<base>/catalog.json` 并与内置目录合并；网络失败静默回退，未知生成器跳过；
+- `mahe.worker_node`：本地多步训练与 Δ 回传，按任务下发的描述符构建数据集与模型；
 - `mahe.lan_scan`：私有网段扫描、主机名解析、远程管理端口探测与可部署性筛选；
 - `mahe.deployer`：生成 POSIX/PowerShell 部署脚本，支持 SSH 远程执行
   （浅克隆指定仓库/分支 → 安装依赖 → `build.py` → 后台启动 Worker）；
-- `mahe.demo_train`：demo / master / worker 入口，负责 UI 就绪握手与生命周期；
-- 演示：`demo_train.py` 在合成分类数据上做 2 worker 数据并行训练。
+- `mahe.platform_dialogs`：跨平台原生「另存为」对话框，Windows 用 PowerShell +
+  WinForms，macOS 用 osascript，Linux 用 zenity/kdialog；失败时返回空串由前端兜底；
+- `mahe.agent`：DeepSeek 助手预留接口。统一的 `status()/ask()`，密钥只从环境变量
+  读取；未配置时抛出 `AgentUnavailable`，不发起任何网络请求；
+- `mahe.demo_train`：默认（干净）/ `--test` / worker 入口，负责 UI 就绪握手、
+  训练线程生命周期与 `--no-ui` 模式。
 
 ## 9. Web UI（HTML/CSS/JS）
 
 - 静态资源位于 `python/mahe/webui/`，由 Python 直接托管，无 Node/前端构建链；
 - 设计上参考 eDEX 的全屏终端气质，但做了收敛：深色底、细线网格、等宽字体、
   单一青绿强调色，不使用大面积辉光与高频动效；
-- 视图：总览（指标/loss 曲线/节点/事件）、集群、部署（设备表/部署日志）、日志；
+- 视图：总览（指标/loss 曲线/节点/事件）、训练（数据集/保存位置/预设/估算）、
+  集群（节点移出与清空）、部署（设备表/部署日志）、助手（预留）、日志；
+- 训练页把“给新手的必要决策”收敛成三步：选数据 → 选模型保存位置 → 确认训练量；
+  `rounds / k_steps / batch` 由预设填充也可手改，前端与服务端各自做一次边界校验；
+- 数据集与参数保存位置属于“非必要后端初始化”，一律在 `ui_ready` 之后再加载；
 - 左上角菜单栏下方固定信息输出区，按 `[信息类型] 内容` 追加训练侧日志；
 - 初始化流程：启动字幕 → POST `ui_ready` → 后端初始化训练模块 →
   初始化完成事件 `app_ready` → 弹出部署方式选择面板；
@@ -189,8 +216,19 @@ GPLv3。注意 pybind11（BSD）与 NASM（BSD-2）兼容。
 
 ## 12. 路线图
 
-- v0.1（本次实现）：C++ 核心 + 汇编内核 + Python PS 训练 + 本地演示 +
-  Web 终端 + 局域网扫描与子端部署流程
+- v0.1（本次实现）：C++ 核心 + 汇编内核 + Python PS 训练 + Web 终端 +
+  局域网扫描与子端部署流程 + 新手训练页/数据集目录/节点分组管理
 - v0.2：真实局域网多机验证、检查点恢复、梯度压缩
-- v0.3：PyTorch 后端、更完整的 Web 视图与控制指令
+- v0.3：DeepSeek 智能助手正式接通、PyTorch 后端、更完整的 Web 视图
 - v0.4：TLS、Web 监控端
+
+## 13. 智能助手接口（预留）
+
+- 协议：前端 `POST /api/command {"cmd":"agent_ask","text":…,"history":[…]}`，
+  服务端返回 `{"ok":true,"reply":…}` 或 `{"ok":false,"error":…}`；
+- 配置：`DEEPSEEK_API_KEY` 为唯一启用条件，`MAHE_DEEPSEEK_MODEL` /
+  `MAHE_DEEPSEEK_BASE` 可选覆盖；密钥不经前端、不写入日志；
+- 行为：未配置密钥时只返回提示，不建立任何外部连接；已配置时走
+  `/chat/completions`（非流式），超时 60s，失败回退为可读错误；
+- 系统提示词把“轮数 / 每轮步数 / 等效 epoch / 模型路径”的口径固定下来，
+  后续接入训练指标时可在同一条命令通道里扩展上下文。
