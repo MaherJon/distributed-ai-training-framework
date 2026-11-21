@@ -157,8 +157,11 @@ ARM（Mac）走 NEON intrinsics 回退路径。
 ## 8. Python 层
 
 - `mahe.web_server.WebUiServer`：回环 HTTP 服务，负责静态页面、SSE 事件流、
-  JSON 指令分发与状态快照；指令覆盖 `ui_ready`、扫描/部署、训练启停、
-  节点移出、模型路径选择、目录刷新与助手对话；
+  JSON 指令分发与状态快照；快照包含 `status / rounds / nodes / devices / settings /
+  datasets / train / agent / pick / ui_ready`，刷新或断线重连后前端据此恢复；
+  指令覆盖 `ui_ready`、扫描/部署、训练启停、节点移出、模型路径选择、目录刷新与
+  助手对话。模型路径对话框与扫描/部署一样在线程中执行，指令本身立即返回，
+  结果通过 `model_path` 事件回传，避免 HTTP 请求被系统对话框长时间占住；
 - `mahe.master_node`：参数服务器、加权聚合（调用汇编内核）、评估与检查点；
   支持按任务切换数据集描述符、移出单个节点或清空节点；
 - `mahe.data`：数据集注册表。每条描述符包含 `id/name/generator/n_features/
@@ -167,29 +170,48 @@ ARM（Mac）走 NEON intrinsics 回退路径。
 - `mahe.community`：可配置的社区目录。读取 `--community` / `MAHE_COMMUNITY_URL`，
   拉取 `<base>/catalog.json` 并与内置目录合并；网络失败静默回退，未知生成器跳过；
 - `mahe.worker_node`：本地多步训练与 Δ 回传，按任务下发的描述符构建数据集与模型；
-- `mahe.lan_scan`：私有网段扫描、主机名解析、远程管理端口探测与可部署性筛选；
+- `mahe.lan_scan`：私有网段扫描。ICMP/TCP 发现在线主机后，读取邻居表（ARP）取
+  MAC、按内置 OUI 子集推断厂商，结合反向 DNS / NetBIOS 主机名、管理端口与
+  MAHE 端口（47820）归类为电脑 / NAS / 打印机 / 路由器 / 手机 / IoT，并给出
+  `candidate` 标记；界面默认只展示候选设备，避免“能上网的都列出来”；
 - `mahe.deployer`：生成 POSIX/PowerShell 部署脚本，支持 SSH 远程执行
   （浅克隆指定仓库/分支 → 安装依赖 → `build.py` → 后台启动 Worker）；
-- `mahe.platform_dialogs`：跨平台原生「另存为」对话框，Windows 用 PowerShell +
-  WinForms，macOS 用 osascript，Linux 用 zenity/kdialog；失败时返回空串由前端兜底；
+- `mahe.platform_dialogs`：跨平台原生「另存为」对话框。Windows 用
+  `-EncodedCommand` 传入 PowerShell（不受控制台代码页影响），先显示 1×1 的
+  TopMost 宿主窗体再以它为 owner 弹窗，保证对话框不会被全屏浏览器压住；结果写入
+  临时文件并返回 `ok / cancelled / unavailable / error` 结构化状态；
+  macOS 用 osascript，Linux 用 zenity/kdialog，缺组件时明确返回 unavailable；
 - `mahe.agent`：DeepSeek 助手预留接口。统一的 `status()/ask()`，密钥只从环境变量
   读取；未配置时抛出 `AgentUnavailable`，不发起任何网络请求；
 - `mahe.demo_train`：默认（干净）/ `--test` / worker 入口，负责 UI 就绪握手、
-  训练线程生命周期与 `--no-ui` 模式。
+  训练线程生命周期、异步对话框线程与 `--no-ui` 模式。
 
 ## 9. Web UI（HTML/CSS/JS）
 
 - 静态资源位于 `python/mahe/webui/`，由 Python 直接托管，无 Node/前端构建链；
 - 设计上参考 eDEX 的全屏终端气质，但做了收敛：深色底、细线网格、等宽字体、
   单一青绿强调色，不使用大面积辉光与高频动效；
-- 视图：总览（指标/loss 曲线/节点/事件）、训练（数据集/保存位置/预设/估算）、
+- 视图：总览（指标/操作条/loss 曲线/节点/事件）、训练（数据集/保存位置/预设/估算）、
   集群（节点移出与清空）、部署（设备表/部署日志）、助手（预留）、日志；
+- 总览把“开始训练 / 扫描局域网 / 手动部署 / 停止训练”放在指标下方的操作条里，
+  并用 `position: sticky` 吸附，1280×800 与 1366×768 下首屏即可看到；图表行用固定
+  行高（`grid-auto-rows`）避免 canvas 百分比高度形成循环，日志区吸收剩余高度；
 - 训练页把“给新手的必要决策”收敛成三步：选数据 → 选模型保存位置 → 确认训练量；
   `rounds / k_steps / batch` 由预设填充也可手改，前端与服务端各自做一次边界校验；
 - 数据集与参数保存位置属于“非必要后端初始化”，一律在 `ui_ready` 之后再加载；
 - 左上角菜单栏下方固定信息输出区，按 `[信息类型] 内容` 追加训练侧日志；
 - 初始化流程：启动字幕 → POST `ui_ready` → 后端初始化训练模块 →
   初始化完成事件 `app_ready` → 弹出部署方式选择面板；
+- **刷新/重连恢复**：页面启动时先 GET `/api/status`。若 `ui_ready` 已为 true，
+  直接跳过启动字幕与 `ui_ready` 调用，用快照恢复轮次曲线、节点、训练状态与当前
+  视图；`sessionStorage` 保存视图、表单草稿与部署面板“已看过”标记，因此刷新不会
+  重放 init、不会丢失训练状态、也不会重复弹窗；
+- **异步原生对话框**：点「浏览…」只发起 `pick_model_path` 指令，后端立刻返回
+  `pending` 并在后台线程弹窗；结果通过 `model_path` 事件回传，前端更新输入框或
+  提示取消/不可用，按钮不会长时间转圈；
+- **设备身份化**：部署表按“主机名 / 厂商 · 系统” + “IP / MAC”展示设备，默认过滤
+  非训练目标（手机/打印机/路由器/无管理端口主机），支持“显示全部”与按名称、IP、
+  厂商搜索；已在运行 MAHE 的设备带 `MAHE` 标记；
 - SSE 断线自动重连，服务端先补发快照；浏览器关闭不影响训练。
 
 ## 10. 构建与分发（build.py）
@@ -209,6 +231,12 @@ Python 驱动（跨平台），职责：
 6. 安装器：PyInstaller onedir 冻结引擎（含 Web UI 静态资源）→ onefile 安装器；
    安装器按用户级目录复制文件并创建桌面快捷方式，Windows 额外写开始菜单与卸载项。
    该流程不再依赖 JDK / jpackage / WiX / Inno Setup。
+7. 持续集成：`.github/workflows/ci.yml` 在 push 到 `main` 与 PR 上运行。
+   - `unit-tests`：Ubuntu + Python 3.10/3.12，`compileall`、`pytest`（tests/ 下的
+     扫描归类、Web 控制面、对话框与前端资源一致性用例）与 `node --check`；
+   - `cpp-tests`：Ubuntu（g++ + NASM）、Windows（MSVC + NASM）、macOS 14（arm64
+     NEON）分别执行 `python build.py --test`，并做 `mahe.HAS_CORE` 导入冒烟测试；
+   - 测试不依赖真实局域网或桌面环境，保证 fork/PR 可稳定复现。
 
 ## 11. 开源协议
 

@@ -71,6 +71,20 @@
           <div class="metric"><span>EVAL ACC</span><b id="m-acc">—</b></div>
           <div class="metric"><span>NODES</span><b id="m-nodes">0</b></div>
         </div>
+        <!-- 主操作固定在首屏：不随日志/图表下沉 -->
+        <div class="panel action-bar">
+          <div class="panel-head">
+            <span>QUICK ACTIONS</span>
+            <span id="action-state" class="dim">就绪</span>
+          </div>
+          <div class="action-row">
+            <button id="btn-go-train" class="btn">开始训练</button>
+            <button id="btn-scan" class="btn ghost">扫描局域网</button>
+            <button id="btn-manual" class="btn ghost">手动部署</button>
+            <button id="btn-stop" class="btn danger ghost">停止训练</button>
+            <span class="hint-inline">干净环境：先到「训练」页选数据与保存位置；节点不足时训练会等待入网。</span>
+          </div>
+        </div>
         <div class="grid">
           <div class="panel chart-panel">
             <div class="panel-head">
@@ -91,21 +105,9 @@
             <div id="node-list" class="node-list"></div>
           </div>
         </div>
-        <div class="grid">
-          <div class="panel log-panel">
-            <div class="panel-head"><span>EVENT LOG</span><span class="dim">最近 200 条</span></div>
-            <div id="event-log" class="event-log"></div>
-          </div>
-          <div class="panel">
-            <div class="panel-head"><span>QUICK ACTIONS</span></div>
-            <div class="actions">
-              <button id="btn-go-train" class="btn">开始训练</button>
-              <button id="btn-scan" class="btn ghost">扫描局域网</button>
-              <button id="btn-manual" class="btn ghost">手动部署</button>
-              <button id="btn-stop" class="btn danger ghost">停止训练</button>
-            </div>
-            <p class="hint">默认是干净环境：没有节点、也不会自动开跑。先到「训练」页选数据与保存位置。</p>
-          </div>
+        <div class="panel log-panel">
+          <div class="panel-head"><span>EVENT LOG</span><span class="dim">最近 200 条</span></div>
+          <div id="event-log" class="event-log"></div>
         </div>
       </section>
 
@@ -203,14 +205,32 @@
             <button id="btn-scan-2" class="btn">扫描</button>
             <span id="device-summary" class="dim"></span>
           </div>
+          <div class="scan-filters">
+            <label class="toggle" title="默认只展示可能是训练节点的设备">
+              <input id="show-all" type="checkbox"> 显示全部在线主机
+            </label>
+            <input id="device-search" placeholder="筛选：主机名 / IP / 厂商">
+            <span id="filter-count" class="dim"></span>
+          </div>
           <div class="table-wrap">
             <table class="device-table">
               <thead>
-                <tr><th></th><th>设备</th><th>地址</th><th>类型</th><th>开放端口</th><th>部署条件</th></tr>
+                <tr>
+                  <th class="col-check"><input id="check-all" type="checkbox" title="全选可自动部署设备"></th>
+                  <th>设备（主机名 / 厂商）</th>
+                  <th>地址（IP / MAC）</th>
+                  <th>类型</th>
+                  <th>开放端口</th>
+                  <th>部署条件</th>
+                </tr>
               </thead>
               <tbody id="device-body"></tbody>
             </table>
           </div>
+          <p class="hint">
+            默认只显示可能的训练节点：手机、打印机、路由器等非目标设备已折叠，
+            勾选“显示全部在线主机”可查看；厂商来自邻居表 OUI，仅供参考。
+          </p>
           <div class="deploy-controls">
             <input id="ssh-user" placeholder="SSH 用户名（自动部署需要）">
             <button id="btn-deploy" class="btn">部署选中设备</button>

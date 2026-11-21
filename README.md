@@ -12,6 +12,7 @@ Python drives training and orchestration, and a self-contained web terminal
 (HTML/CSS/JS served by Python) provides the control console.
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+[![CI](https://github.com/MaherJon/distributed-ai-training-framework/actions/workflows/ci.yml/badge.svg)](https://github.com/MaherJon/distributed-ai-training-framework/actions/workflows/ci.yml)
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 ![C++17](https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus&logoColor=white)
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
@@ -79,10 +80,15 @@ User guide (Chinese): [docs/USER_GUIDE.md](docs/USER_GUIDE.md) · Design doc (Ch
 | Dataset catalog | Built-in datasets plus an optional community catalog (`--community` / `MAHE_COMMUNITY_URL`) |
 | Node group management | Remove any node from the group, or clear all; removed workers receive `BYE` and exit |
 | Observable UI | Browser web terminal on `127.0.0.1:47830`; boot subtitles finish before training init; logs stream as `[KIND] message` |
+| Refresh-safe console | A reload reconnects to the live snapshot and restores training state, chart, view and form draft — no boot replay, no second init |
+| First-screen actions | Start / scan / manual deploy / stop sit in a sticky action bar above the chart, visible without scrolling |
+| Non-blocking model dialog | "Browse…" returns immediately, opens a topmost native dialog on the engine host, and reports pick/cancel/failure back over SSE |
+| Identity-aware LAN scan | Candidates only by default; each row shows hostname, vendor (OUI), MAC, OS and MAHE presence, so the target machine is obvious |
 | LAN scan & deploy | Discover LAN hosts, filter by remote-management ports, then pull source from GitHub and build workers |
 | One-click installer | `build.py --bundle` produces a single-file installer that creates desktop shortcuts |
 | Cluster packaging | `--build-cluster` generates master/worker bundles by device count and OS |
 | Assistant (reserved) | DeepSeek protocol and UI entry are wired; no network request without an API key |
+| CI | GitHub Actions runs the Python unit tests and builds/runs the C++ core tests on Linux, Windows and macOS |
 
 ## Quick start
 
@@ -252,18 +258,26 @@ python3 -m mahe.demo_train --no-ui            # headless server
 
 Flow:
 
-1. The browser plays the boot subtitles.
+1. The browser plays the boot subtitles (first visit only).
 2. On completion it posts `ui_ready`; only then does the backend initialize the
    C++ core, scheduler and training modules.
 3. Initialization messages appear in the left info panel as `[INIT] …`, `[WARN] …`,
    `[ERROR] …`.
 4. After initialization, a deployment panel offers LAN auto-deploy, manual scripts,
-   or "later".
+   or "later" (shown once, not on every reload).
+
+Reloading the page is safe: the console asks `/api/status` for the engine snapshot
+before deciding what to do. If the backend is already initialized it skips the boot
+animation and `ui_ready` entirely, then restores the round/loss history, node list,
+training state (including the Stop button) and the active view. Input drafts and the
+deployment-panel choice are kept in `sessionStorage` for the tab.
 
 The layout is an intentionally restrained eDEX-style terminal: dark background,
 hairline grid, monospace type and a single teal accent. Views: dashboard, training,
-cluster, deploy, assistant and logs. Closing the browser does not affect training;
-reopening resyncs a full snapshot.
+cluster, deploy, assistant and logs. The dashboard keeps Start / Scan / Manual deploy /
+Stop in a sticky action bar directly under the metrics, so they stay clickable without
+scrolling (checked down to 1366×768 and 1280×800). Closing the browser does not affect
+training; reopening resyncs a full snapshot.
 
 ### Training page (beginner flow)
 
@@ -272,9 +286,11 @@ Three steps:
 1. **Pick data** — the dropdown lists built-in and community datasets with
    dimensions, classes, sample count, a one-line description and recommended
    parameters. "Refresh" re-fetches the catalog.
-2. **Model location** — "Browse…" opens a native save dialog on the engine host
-   (PowerShell on Windows, osascript on macOS, zenity/kdialog on Linux); typing a
-   path also works, and missing directories are created.
+2. **Model location** — "Browse…" asks the engine host to open a native save dialog
+   (topmost PowerShell/WinForms on Windows, osascript on macOS, zenity/kdialog on
+   Linux). The request returns immediately and the result arrives over SSE, so the
+   button never hangs; picking, cancelling or an unavailable dialog all produce a
+   visible message. Typing a path also works, and missing directories are created.
 3. **Volume and parameters** — `Quick / Standard / Thorough` presets fill
    `rounds / k_steps / batch`; you can override them. The live estimate shows
    `total steps · samples per round · equivalent epochs` with an under-/over-training
@@ -312,12 +328,19 @@ and endpoint.
 
 ### Sub-node deployment
 
-- **Scan**: the master probes its private /24 (or a user-supplied CIDR), resolves
-  hostnames and checks SSH/SMB/RDP/WinRM/AFP/VNC ports. Results show device name,
-  type and whether auto-deploy is possible.
+- **Scan**: the master probes its private /24 (or a user-supplied CIDR), reads the
+  neighbour (ARP) table to get MACs and OUI vendors, resolves reverse-DNS/NetBIOS
+  hostnames, and checks SSH/SMB/RDP/WinRM/AFP/VNC/printer ports plus the MAHE port
+  (47820). Each row shows the hostname, vendor, OS, MAC and open ports so you can tell
+  which machine is which instead of guessing from an IP.
+- **Candidates only by default**: phones, printers, routers and hosts without any
+  remote-management port are folded away behind "show all online hosts". Routers,
+  printers, phones and IoT devices are never offered as training targets even if they
+  expose SSH.
 - **Deploy**: for SSH-capable hosts, the master runs a generated bootstrap script
   that shallow-clones the configured GitHub repository/branch, installs
-  numpy/pybind11, runs `build.py`, and starts a worker in the background.
+  numpy/pybind11, runs `build.py`, and starts a worker in the background. Hosts already
+  running MAHE are tagged `MAHE` and can join directly.
 - **Manual**: download the POSIX or Windows script and run it on the target machine.
   Automatic deployment uses SSH key auth (`BatchMode`); passwords are never stored.
 
@@ -361,16 +384,18 @@ python/mahe/
   community.py          community dataset catalog (configurable, falls back to built-ins)
   worker_node.py        local multi-step training, Δ upload
   master_node.py        parameter server: weighted aggregation, eval, checkpoints, node removal
-  web_server.py         HTTP + SSE + command channel
+  web_server.py         HTTP + SSE + command channel (snapshot, async dialog events)
   webui/                static web terminal (HTML/CSS/JS)
-  lan_scan.py           LAN device discovery and deployability filter
+  lan_scan.py           LAN discovery: MAC/vendor/NetBIOS identity + candidate filter
   deployer.py           GitHub source pull + remote build/deploy scripts
-  platform_dialogs.py   cross-platform native file dialog (model location)
+  platform_dialogs.py   cross-platform native file dialog (topmost, structured result)
   agent.py              DeepSeek assistant protocol (reserved)
   demo_train.py         default / --test / worker entry point
 packaging/
   engine_entry.py       PyInstaller entry for mahe-engine
   installer_entry.py    installer: copy files + desktop shortcuts
+tests/                  pytest suite (lan_scan / web_server / dialogs / web assets)
+.github/workflows/ci.yml  GitHub Actions: unit tests + C++ tests on 3 OSes
 docs/USER_GUIDE.md      user guide (Chinese)
 build.py                cross-platform build / test / cluster bundling / installer
 ```
@@ -378,7 +403,10 @@ build.py                cross-platform build / test / cluster bundling / install
 ## Testing
 
 ```bash
-python build.py --test
+python build.py --test          # C++ unit tests (SIMD, protocol, scheduler, handshake)
+python -m pip install -r requirements-dev.txt
+python -m pytest -q             # Python unit tests (no network, no desktop required)
+node --check python/mahe/webui/app.js
 ```
 
 Coverage:
@@ -389,11 +417,27 @@ Coverage:
 - Task dispatch, completion, node removal
 - Master/worker handshake, token rejection, bidirectional messages, graceful shutdown
 - Web terminal: static assets, `ui_ready` handshake and `/api/status` snapshot
+- Web control plane: snapshot shape, idempotent `ui_ready`, async model-path dialog
+  events, node/train state transitions
+- LAN scan: MAC normalization/OUI lookup, device classification, candidate filtering,
+  hostname-first labels (pure functions, safe on CI)
+- Frontend consistency: every `$("#id")` in `app.js` exists in `index.html`, nav targets
+  match view sections, dashboard actions precede the chart
 
 End-to-end: `--test` really spawns 2 worker subprocesses, trains the requested rounds
 and writes a checkpoint. `python -m mahe.demo_train --test --no-ui --dataset
 builtin:rings4` verifies that datasets with different dimensions/classes propagate
 correctly from master to workers.
+
+### Continuous integration
+
+`.github/workflows/ci.yml` runs on every push to `main` and every pull request:
+
+- **unit-tests** — Ubuntu with Python 3.10 and 3.12: byte-compile everything, run
+  `pytest`, and `node --check` the web assets.
+- **cpp-tests** — Ubuntu (g++ + NASM), Windows (MSVC + NASM) and macOS 14 (arm64,
+  NEON): `python build.py --test` plus an import smoke test that asserts
+  `mahe.HAS_CORE`.
 
 ## Roadmap
 
@@ -412,16 +456,20 @@ correctly from master to workers.
   only expose WinRM must use the manual PowerShell script.
 - The community catalog currently accepts generator descriptors only (each node
   reproduces the data locally); real data-file distribution is not implemented.
+- Device vendors come from a built-in OUI subset (best effort); unknown vendors show
+  as "vendor unknown" and fall back to port/hostname heuristics.
 - The assistant stays disabled until `DEEPSEEK_API_KEY` is configured.
 
 ## Contributing
 
 Issues and PRs are welcome. Before submitting:
 
-1. Make `python build.py --test` pass.
+1. Make `python build.py --test` and `python -m pytest -q` pass.
 2. Keep the C++ and Python sides in sync; new kernels must ship with a scalar fallback.
 3. For assembly changes, test on the target architecture and state the `kernel_impl()`
    output in the PR description.
+4. For web-console changes, run `node --check python/mahe/webui/app.js` and confirm a
+   page reload keeps the current training state.
 
 If this project helps you, a star is the best support.
 

@@ -51,6 +51,7 @@ class UiState:
         self.community: dict[str, Any] = {}
         self.train: dict[str, Any] = {"running": False, "rounds_total": 0}
         self.agent: dict[str, Any] = {}
+        self.pick: dict[str, Any] = {"status": "idle"}
         self.ui_ready = threading.Event()
 
     def snapshot(self) -> dict[str, Any]:
@@ -71,6 +72,7 @@ class UiState:
                 "community": dict(self.community),
                 "train": dict(self.train),
                 "agent": dict(self.agent),
+                "pick": dict(self.pick),
                 "ui_ready": self.ui_ready.is_set(),
                 "ui_port": self.ui_port,
             }
@@ -135,6 +137,10 @@ class UiState:
     def set_agent(self, info: dict[str, Any]) -> None:
         with self._lock:
             self.agent = dict(info)
+
+    def set_pick(self, status: str, path: str = "", detail: str = "") -> None:
+        with self._lock:
+            self.pick = {"status": status, "path": path, "detail": detail}
 
     def set_devices(self, devices: list[dict[str, Any]]) -> None:
         with self._lock:
@@ -333,7 +339,7 @@ class WebUiServer:
         self.on_start_training: Callable[[dict[str, Any]], dict[str, Any]] | None = None
         self.on_kick_node: Callable[[dict[str, Any]], None] | None = None
         self.on_clear_nodes: Callable[[], None] | None = None
-        self.on_pick_path: Callable[[dict[str, Any]], str] | None = None
+        self.on_pick_path: Callable[[dict[str, Any]], dict[str, Any]] | None = None
         self.on_refresh_datasets: Callable[[], dict[str, Any]] | None = None
         self.on_agent_ask: Callable[[dict[str, Any]], dict[str, Any]] | None = None
         self._script_provider: Callable[[str], str] | None = None
@@ -426,6 +432,13 @@ class WebUiServer:
         self.state.set_devices(list(devices.values()))
         self.hub.publish({"type": "scan", "phase": "device", "device": device})
 
+    def publish_model_path(self, status: str, path: str = "",
+                           detail: str = "") -> None:
+        """原生对话框结果事件：前端据此更新输入框或提示取消原因。"""
+        self.state.set_pick(status, path, detail)
+        self.hub.publish({"type": "model_path", "status": status,
+                          "path": path, "detail": detail})
+
     def publish_deploy(self, phase: str, text: str = "",
                        device: dict[str, Any] | None = None) -> None:
         ev: dict[str, Any] = {"type": "deploy", "phase": phase, "text": text}
@@ -485,8 +498,9 @@ class WebUiServer:
                 self.on_clear_nodes()
             return {"status": "ok"}
         if name == "pick_model_path":
-            path = self.on_pick_path(cmd) if self.on_pick_path else ""
-            return {"path": path}
+            if self.on_pick_path is None:
+                return {"status": "unavailable", "detail": "对话框服务未就绪"}
+            return self.on_pick_path(cmd) or {"status": "pending"}
         if name == "refresh_datasets":
             if self.on_refresh_datasets is None:
                 return {"ok": False, "error": "目录服务未就绪"}
