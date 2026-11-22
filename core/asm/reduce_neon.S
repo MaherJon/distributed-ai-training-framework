@@ -44,10 +44,10 @@ mahe_reduce_add_f32_neon:
 .align 4
 .global mahe_sgd_update_f32_neon
 // param[i] -= lr * grad[i]
-// 用 fmla：把 lr 取负广播，param += (-lr)*grad
+// 用 fmla：把 lr 取负广播到 v4，param += (-lr)*grad
 mahe_sgd_update_f32_neon:
-    fmov    s5, s0                  // 保存标量 lr 给尾部
-    dup     v4.4s, s0               // 广播 lr
+    fmov    w9, s0                  // 保存 lr 的位模式（x9 是调用者保存寄存器）
+    dup     v4.4s, v0.s[0]          // 广播 lr（s0 是 v0 的低 lane）
     fneg    v4.4s, v4.4s            // -lr
     mov     x3, x2
     lsr     x3, x3, #4
@@ -70,7 +70,8 @@ mahe_sgd_update_f32_neon:
 2:
     ldr     s0, [x0]
     ldr     s1, [x1]
-    fmul    s2, s1, s5              // lr * grad
+    fmov    s2, w9                  // 取回 lr（向量循环里 v5 已被覆盖，不能用它）
+    fmul    s2, s1, s2              // lr * grad
     fsub    s0, s0, s2              // param -= lr*grad
     str     s0, [x0]
     add     x0, x0, #4
