@@ -62,8 +62,36 @@ HOST_OS = platform.system().lower()  # windows / darwin / linux
 HOST_ARCH = platform.machine().lower()  # x86_64 / aarch64 / arm64 / ...
 
 
+def _configure_stdio() -> None:
+    """避免非 UTF-8 控制台因中文日志抛 UnicodeEncodeError。
+
+    GitHub Actions 的 Windows runner 默认 cp1252，打印中文会直接崩；
+    那里把流切到 UTF-8（日志按 UTF-8 展示）。本地控制台只把错误策略改成
+    replace，保留系统代码页，避免中文变成乱码。
+    """
+    force_utf8 = bool(os.environ.get("GITHUB_ACTIONS") or
+                      os.environ.get("MAHE_FORCE_UTF8"))
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            if force_utf8:
+                reconfigure(encoding="utf-8", errors="replace")
+            else:
+                reconfigure(errors="replace")
+        except (OSError, ValueError):
+            pass
+
+
+_configure_stdio()
+
+
 def log(msg: str) -> None:
-    print(f"[build] {msg}")
+    try:
+        print(f"[build] {msg}")
+    except UnicodeEncodeError:  # 极端环境（流不可 reconfigure）兜底
+        print(f"[build] {msg.encode('ascii', 'replace').decode('ascii')}")
 
 
 def run(cmd: list[str], **kw) -> None:
@@ -217,8 +245,11 @@ def build_extension(cxx: str, objs: list[Path], asm_obj: Path | None) -> Path:
         sources.append(str(asm_obj))
 
     if is_msvc(cxx):
+        # /IMPLIB 把 .lib/.exp 收进 build/obj，避免 cl /LD 在仓库根目录留垃圾
+        implib = Path(objs[0]).parent / "mahe_core.lib" if objs else BUILD / "mahe_core.lib"
         run([cxx, *cxx_flags(cxx), *include_flags(cxx), "/LD", *sources,
-             "/link", f"/OUT:{out}", *python_link_flags(cxx)])
+             "/link", f"/OUT:{out}", f"/IMPLIB:{implib}",
+             *python_link_flags(cxx)])
     else:
         link = ["-shared"]
         if IS_MAC:
