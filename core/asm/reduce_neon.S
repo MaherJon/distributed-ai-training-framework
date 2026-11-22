@@ -61,11 +61,13 @@ MAHE_SYM(mahe_sgd_update_f32_neon):
     cbz     x3, .Sstail
 1:
     ld1     {v0.4s - v3.4s}, [x0]
-    ld1     {v5.4s - v8.4s}, [x1]
-    fmla    v0.4s, v5.4s, v4.4s
-    fmla    v1.4s, v6.4s, v4.4s
-    fmla    v2.4s, v7.4s, v4.4s
-    fmla    v3.4s, v8.4s, v4.4s
+    // 用 v16-v19（调用者保存）而不是 v5-v8：v8 属于 v8-v15 被调用者保存寄存器，
+    // 直接覆盖会破坏 AAPCS64 调用约定
+    ld1     {v16.4s - v19.4s}, [x1]
+    fmla    v0.4s, v16.4s, v4.4s
+    fmla    v1.4s, v17.4s, v4.4s
+    fmla    v2.4s, v18.4s, v4.4s
+    fmla    v3.4s, v19.4s, v4.4s
     st1     {v0.4s - v3.4s}, [x0]
     add     x0, x0, #64
     add     x1, x1, #64
