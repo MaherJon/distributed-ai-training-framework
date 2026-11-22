@@ -141,6 +141,8 @@ static void test_master_worker() {
 }
 
 int main() {
+  // 无缓冲：崩溃时也能看到执行到哪一项（CI 上 stdout 重定向后默认是块缓冲）
+  std::setvbuf(stdout, nullptr, _IONBF, 0);
   test_kernel();
   test_protocol();
   test_scheduler();

@@ -76,21 +76,32 @@ Connection::Connection(sock::socket_t fd, std::string peer)
   sock::set_nodelay(fd_);
 }
 
-Connection::~Connection() { close(); }
+Connection::~Connection() {
+  // 析构可能发生在读/写线程自身（最后一个 shared_ptr 在线程退出路径释放）。
+  // 此时 close() 的幂等门已置位，不能依赖它收尾，否则 joinable 的 std::thread
+  // 成员析构会直接 std::terminate。
+  closing_ = true;
+  open_ = false;
+  close_fd();
+  wcv_.notify_all();
+  close_started_ = true;
+  join_threads();
+}
 
 void Connection::start(MessageHandler on_msg, CloseHandler on_close) {
   open_ = true;
-  reader_ = std::thread([this, on_msg = std::move(on_msg),
+  // 线程入口持有 shared_ptr：即使调用方提前释放连接，读/写线程结束前对象仍然有效
+  auto self = shared_from_this();
+  reader_ = std::thread([self, on_msg = std::move(on_msg),
                          on_close = std::move(on_close)]() mutable {
-    read_loop_with_handlers(std::move(on_msg), std::move(on_close));
+    self->read_loop_with_handlers(std::move(on_msg), std::move(on_close));
   });
-  writer_ = std::thread([this] { write_loop(); });
+  writer_ = std::thread([self] { self->write_loop(); });
 }
 
 // 声明于下：将 read_loop 与回调封装，避免部分捕获 shared_from_this 生命周期问题
 void Connection::read_loop_with_handlers(MessageHandler on_msg,
                                          CloseHandler on_close) {
-  auto self = shared_from_this();
   read_loop_impl(std::move(on_msg));
   open_ = false;
   // 唤醒写线程退出
@@ -144,7 +155,6 @@ void Connection::read_loop_impl(const MessageHandler& on_msg) {
 }
 
 void Connection::write_loop() {
-  auto self = shared_from_this();
   while (true) {
     std::string frame;
     {
@@ -190,19 +200,31 @@ bool Connection::send(const Message& msg) {
 }
 
 void Connection::close() {
+  // 并发关闭只让第一个线程执行；另外两条路径（读线程收到 BYE / 写线程 send 失败）
+  // 不能同时 join 同一个 std::thread，否则会 EINVAL 抛 std::system_error。
+  if (close_started_.exchange(true))
+    return;
   closing_ = true;
   open_ = false;
-  bool fd_open = false;
-  if (fd_closed_.compare_exchange_strong(fd_open, true)) {
-#ifdef _WIN32
-    shutdown(static_cast<SOCKET>(fd_), SD_BOTH);
-    sock::close(fd_);
-#else
-    ::shutdown(fd_, SHUT_RDWR);
-    sock::close(fd_);
-#endif
-  }
+  close_fd();
   wcv_.notify_all();
+  join_threads();
+}
+
+void Connection::close_fd() {
+  bool fd_open = false;
+  if (!fd_closed_.compare_exchange_strong(fd_open, true))
+    return;
+#ifdef _WIN32
+  shutdown(static_cast<SOCKET>(fd_), SD_BOTH);
+  sock::close(fd_);
+#else
+  ::shutdown(fd_, SHUT_RDWR);
+  sock::close(fd_);
+#endif
+}
+
+void Connection::join_threads() {
   // 若在自身读/写线程内被调用（如连接回调触发的析构），detach 自身避免
   // joinable 线程随对象销毁触发 std::terminate
   if (reader_.joinable()) {
