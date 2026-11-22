@@ -13,6 +13,7 @@ Web 终端（HTML/CSS/JS）作为控制台。
 compute-weighted data parallelism, AVX2/NEON kernels, one-click packaging.*
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+[![CI](https://github.com/MaherJon/distributed-ai-training-framework/actions/workflows/ci.yml/badge.svg)](https://github.com/MaherJon/distributed-ai-training-framework/actions/workflows/ci.yml)
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 ![C++17](https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus&logoColor=white)
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
@@ -76,10 +77,15 @@ compute-weighted data parallelism, AVX2/NEON kernels, one-click packaging.*
 | 数据集目录 | 内置数据集 + 可配置的社区目录（`--community` / `MAHE_COMMUNITY_URL`） |
 | 节点分组管理 | 任意节点可「移出分组」，支持一键清空；被移出的 Worker 会收到 BYE 并退出 |
 | 可观测界面 | 浏览器访问 `127.0.0.1:47830`；启动字幕完成前不初始化训练；日志按 `[类型] 内容` 输出 |
+| 刷新不丢状态 | 刷新只重连快照：恢复训练状态、曲线、节点、当前视图与表单草稿，不再重播 init |
+| 首屏主操作 | 开始训练 / 扫描 / 手动部署 / 停止训练固定在指标下方的操作条，无需下滑即可看到 |
+| 非阻塞文件对话框 | 「浏览…」立即返回，对话框以 TopMost 弹在引擎主机上，选择/取消/失败都通过 SSE 回传提示 |
+| 设备身份化扫描 | 默认只显示候选设备；每行显示主机名、厂商（OUI）、MAC、系统与 MAHE 状态，目标设备一目了然 |
 | 局域网扫描部署 | 发现在线设备并按远程管理端口筛选，确认后从 GitHub 拉取源码在子端编译 |
 | 一体化安装器 | `build.py --bundle` 生成单文件安装器，自动创建桌面快捷方式 |
 | 集群打包 | `--build-cluster` 按设备数量与系统生成 master/worker 部署包 |
 | 智能助手（预留） | DeepSeek 协议与界面入口已就位；未配置密钥时不发任何网络请求 |
+| 持续集成 | GitHub Actions 运行 Python 单测，并在 Linux / Windows / macOS 上构建并运行 C++ 单测 |
 
 ## 快速开始
 
@@ -244,14 +250,21 @@ python3 -m mahe.demo_train --no-ui            # 无界面（服务器场景）
 
 初始化流程：
 
-1. 浏览器播放启动字幕；
+1. 浏览器播放启动字幕（仅首次打开时）；
 2. 播放完成后 POST `ui_ready`，后端这时才初始化 C++ 核心、调度器与训练模块；
 3. 初始化信息在左侧信息区按 `[INIT] …`、`[WARN] …`、`[ERROR] …` 输出；
-4. 初始化完成后弹出子端部署面板，可选择扫描局域网自动部署、手动脚本或稍后处理。
+4. 初始化完成后弹出子端部署面板，可选择扫描局域网自动部署、手动脚本或稍后处理
+   （只弹一次，刷新不会重复打扰）。
+
+**刷新是安全的**：页面加载时先请求 `/api/status` 判断后端是否已就绪。已初始化时
+直接跳过启动字幕与 `ui_ready`，从快照恢复轮次/Loss 曲线、节点列表、训练状态
+（含「停止训练」可用状态）与当前视图；输入草稿与部署面板选择保存在
+`sessionStorage`，同一标签页刷新后原样恢复。
 
 界面是收敛版的 eDEX 风格：深色底、细线网格、等宽字体与单一青绿强调色。
-视图包括总览、训练、集群、部署、助手与日志；关闭浏览器不影响训练，重新打开
-会收到完整快照。
+视图包括总览、训练、集群、部署、助手与日志。总览把开始训练 / 扫描局域网 /
+手动部署 / 停止训练放在指标下方的吸附操作条里，常见分辨率（1280×800、
+1366×768）无需下滑即可点击。关闭浏览器不影响训练，重新打开会收到完整快照。
 
 ### 训练页（新手流程）
 
@@ -260,8 +273,10 @@ python3 -m mahe.demo_train --no-ui            # 无界面（服务器场景）
 1. **选择训练数据**：下拉框列出内置数据集与社区目录，附维度、类别数、样本量、
    一句话说明与推荐参数；「刷新」会重新拉取目录。
 2. **模型保存位置**：点「浏览…」由引擎在主机弹出系统原生「另存为」对话框
-   （Windows / macOS / Linux 分别用 PowerShell、osascript、zenity/kdialog），
-   也可以直接输入路径；目录不存在会自动创建。
+   （Windows 用 TopMost 的 PowerShell/WinForms，macOS 用 osascript，
+   Linux 用 zenity/kdialog）。请求会立即返回，结果通过 SSE 回传，所以按钮不会
+   一直转圈；选择成功、取消或环境不支持都会在信息区给出提示。也可以直接输入
+   路径；目录不存在会自动创建。
 3. **训练量与参数**：`快速体验 / 标准 / 充分` 三个预设一键填充
    `rounds / k_steps / batch`，也可以手改；下方实时估算
    `总步数 · 每轮样本 · 等效 epoch`，并提示「偏少 / 适中 / 偏大」。
@@ -294,11 +309,16 @@ Worker 发送 `BYE`，再把它从调度器摘除；正常版本的 Worker 收�
 
 ### 子端部署
 
-- **扫描**：Master 探测本机私有 /24（也可手动指定 CIDR），解析主机名并检测
-  SSH/SMB/RDP/WinRM/AFP/VNC 端口；列表显示设备名称、类型与是否可自动部署。
+- **扫描**：Master 探测本机私有 /24（也可手动指定 CIDR），读取邻居表（ARP）拿
+  MAC 并按 OUI 推断厂商，用反向 DNS / NetBIOS 取主机名，再检测
+  SSH/SMB/RDP/WinRM/AFP/VNC/打印端口与 MAHE 端口（47820）。列表按
+  `主机名 · 厂商 · 系统 / IP · MAC` 展示，能直接看出哪台是目标机器，而不是只给 IP。
+- **默认只显示候选设备**：手机、打印机、路由器以及没有任何远程管理端口的主机会
+  折叠起来（勾选「显示全部在线主机」可展开）。路由器/打印机/手机等即使开放 SSH
+  也不会被当成训练节点。
 - **自动部署**：对开放 SSH 的设备，Master 通过 SSH 执行生成的引导脚本：
   浅克隆指定 GitHub 仓库/分支 → 安装 numpy/pybind11 → 运行 `build.py` →
-  后台启动 Worker。
+  后台启动 Worker；已在运行 MAHE 的设备会打上 `MAHE` 标记，可直接入网。
 - **手动部署**：下载 POSIX 或 Windows 脚本，在目标机执行。自动部署使用 SSH
   密钥（`BatchMode`），不保存任何密码。
 
@@ -341,16 +361,18 @@ python/mahe/
   community.py          社区数据集目录（可配置数据源，失败回退内置）
   worker_node.py        本地多步训练、Δ 回传
   master_node.py        参数服务器：加权聚合、评估、检查点、节点移出
-  web_server.py         HTTP + SSE + 指令通道
+  web_server.py         HTTP + SSE + 指令通道（快照、异步对话框事件）
   webui/                静态 Web 终端（HTML/CSS/JS）
-  lan_scan.py           局域网设备发现与可部署性筛选
+  lan_scan.py           局域网发现：MAC/厂商/NetBIOS 身份信息 + 候选设备筛选
   deployer.py           GitHub 源码拉取与远程编译部署脚本
-  platform_dialogs.py   跨平台原生文件对话框（模型保存位置）
+  platform_dialogs.py   跨平台原生文件对话框（TopMost、结构化结果）
   agent.py              DeepSeek 智能助手预留接口
   demo_train.py         默认 / --test / worker 入口
 packaging/
   engine_entry.py       mahe-engine 的 PyInstaller 入口
   installer_entry.py    安装器：复制文件 + 创建桌面快捷方式
+tests/                  pytest 用例（lan_scan / web_server / 对话框 / 前端资源）
+.github/workflows/ci.yml  GitHub Actions：单测 + 三平台 C++ 测试
 docs/USER_GUIDE.md      用户手册
 build.py                跨平台构建 / 测试 / 组网打包 / 安装器
 ```
@@ -358,7 +380,10 @@ build.py                跨平台构建 / 测试 / 组网打包 / 安装器
 ## 测试
 
 ```bash
-python build.py --test
+python build.py --test          # C++ 单测（SIMD / 协议 / 调度 / 握手）
+python -m pip install -r requirements-dev.txt
+python -m pytest -q             # Python 单测（不访问网络、不需要桌面环境）
+node --check python/mahe/webui/app.js
 ```
 
 覆盖：
@@ -369,10 +394,23 @@ python build.py --test
 - 任务派发、完成、节点移除
 - Master/Worker 握手、令牌拒绝、双向消息、优雅停止
 - Web 终端：静态资源、`ui_ready` 握手与 `/api/status` 快照
+- Web 控制面：快照字段、`ui_ready` 幂等、异步模型路径对话框事件、训练/节点状态迁移
+- 局域网扫描：MAC 归一化与 OUI 厂商、设备归类、候选筛选、主机名优先命名（纯函数）
+- 前端一致性：`app.js` 引用的 id 都存在于 `index.html`、导航与视图一一对应、
+  总览操作条排在图表之前
 
 端到端：`--test` 真实启动 2 个 Worker 子进程、跑完指定轮次并落盘检查点；
 `python -m mahe.demo_train --test --no-ui --dataset builtin:rings4` 可验证不同
 维度/类别数的数据集在 Master 与 Worker 之间正确同步。
+
+### 持续集成
+
+`.github/workflows/ci.yml` 在每次 push 到 `main` 与每个 PR 上运行：
+
+- **unit-tests**：Ubuntu + Python 3.10/3.12，字节编译、`pytest`、
+  `node --check` 校验前端脚本；
+- **cpp-tests**：Ubuntu（g++ + NASM）、Windows（MSVC + NASM）、macOS 14（arm64，
+  NEON）三平台执行 `python build.py --test`，并做一次 `mahe.HAS_CORE` 导入冒烟测试。
 
 ## 路线图
 
@@ -390,15 +428,19 @@ python build.py --test
 - 自动子端部署依赖 SSH 密钥认证；仅开放 WinRM 的 Windows 主机需使用手动脚本；
 - 社区数据集目录当前只接受「生成器描述符」（各节点本地复现）；真实数据文件分发
   尚未实现；
+- 设备厂商来自内置的常用 OUI 子集（尽力而为），未收录时显示「厂商未知」，退回
+  端口与主机名启发式；
 - 智能助手在未配置 `DEEPSEEK_API_KEY` 时保持禁用。
 
 ## 参与贡献
 
 欢迎 Issue 与 PR。提交前请：
 
-1. 跑通 `python build.py --test`；
+1. 跑通 `python build.py --test` 与 `python -m pytest -q`；
 2. 保持 C++ 与 Python 两侧接口一致，新增内核需同时提供标量回退；
-3. 汇编改动请在目标架构上实测，并在 PR 描述中写明 `kernel_impl()` 输出。
+3. 汇编改动请在目标架构上实测，并在 PR 描述中写明 `kernel_impl()` 输出；
+4. 前端改动请运行 `node --check python/mahe/webui/app.js`，并确认刷新页面后训练
+   状态没有被重置。
 
 如果这个项目对你有帮助，点一个 Star 就是最好的支持。
 

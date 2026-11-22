@@ -7,6 +7,31 @@
   const $ = (sel) => document.querySelector(sel);
   const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 
+  // 刷新页面时恢复“同一标签页”的 UI 状态；训练数据本身来自后端快照。
+  const STORE = {
+    choice: "mahe.choice",
+    view: "mahe.view",
+    form: "mahe.form",
+    preset: "mahe.preset",
+  };
+
+  function readStore(key, fallback) {
+    try {
+      const raw = sessionStorage.getItem(key);
+      return raw === null ? fallback : JSON.parse(raw);
+    } catch (_) {
+      return fallback;
+    }
+  }
+
+  function writeStore(key, value) {
+    try {
+      sessionStorage.setItem(key, JSON.stringify(value));
+    } catch (_) {
+      /* 隐私模式禁写时忽略 */
+    }
+  }
+
   const STATUS_TEXT = {
     booting: "BOOTING",
     initializing: "INIT",
@@ -38,14 +63,19 @@
     selected: new Set(),
     infoCount: 0,
     scanning: false,
-    choiceShown: false,
+    choiceShown: readStore(STORE.choice, false),
     scriptPlatform: "posix",
     settings: {},
     datasets: [],
     community: {},
     train: { running: false, rounds_total: 0 },
     agent: { enabled: false },
-    preset: "normal",
+    preset: readStore(STORE.preset, "normal"),
+    uiReady: false,
+    pickPending: false,
+    showAll: false,
+    query: "",
+    view: null,
   };
 
   let linkOpen = false;
@@ -121,15 +151,59 @@
 
     try {
       await post({ cmd: "ui_ready" });
+      state.uiReady = true;
       setText("#boot-hint", "已通知训练模块初始化");
     } catch (err) {
       setText("#boot-hint", `通知失败：${err.message}（后端仍会在超时后继续）`);
     }
 
     await sleep(320);
-    $("#boot").classList.add("fade");
+    const boot = $("#boot");
+    if (boot) boot.classList.add("fade");
+    showApp();
+    setTimeout(() => {
+      const el = $("#boot");
+      if (el) el.remove();
+    }, 420);
+  }
+
+  function showApp() {
     $("#app").classList.remove("hidden");
-    setTimeout(() => $("#boot").remove(), 420);
+    requestAnimationFrame(() => drawChart());
+  }
+
+  async function fetchSnapshot() {
+    try {
+      const res = await fetch("/api/status", { cache: "no-store" });
+      if (!res.ok) return null;
+      return await res.json();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /* 首次打开播放启动字幕并触发后端初始化；刷新/重连时直接恢复快照，
+     不再重放 init，也不会重置训练状态。 */
+  async function boot() {
+    bind();
+    connect();
+    renderNodes();
+    renderDevices();
+    renderTrainState();
+
+    const snap = await fetchSnapshot();
+    if (snap && snap.ui_ready) {
+      state.uiReady = true;
+      hydrate(snap);
+      restoreUiState();
+      const el = $("#boot");
+      if (el) el.remove();
+      showApp();
+      addInfo("UI", "已恢复上次会话：训练状态与图表来自引擎快照", false);
+      return;
+    }
+    await runBoot();
+    restoreUiState();
   }
 
   function waitForLink(timeout) {
@@ -219,6 +293,9 @@
       case "agent":
         applyAgent(ev.agent || ev);
         break;
+      case "model_path":
+        onModelPathEvent(ev);
+        break;
       case "app_ready":
         onAppReady(ev);
         break;
@@ -249,8 +326,12 @@
     drawChart();
 
     state.devices = new Map();
+    const keepSelected = new Set(state.selected);
     state.selected.clear();
     (snap.devices || []).forEach((d) => state.devices.set(d.ip, d));
+    for (const ip of keepSelected) {
+      if (state.devices.has(ip)) state.selected.add(ip);
+    }
     renderDevices();
 
     applySettings(snap.settings || {});
@@ -258,6 +339,8 @@
     state.train = snap.train || { running: false, rounds_total: 0 };
     renderTrainState();
     applyAgent(snap.agent || {});
+    applyPickState(snap.pick || { status: "idle" });
+    restoreFormDraft();
 
     // 重连快照只补最近的信息，避免重复堆积
     const stream = $("#info-stream");
@@ -270,11 +353,17 @@
     if (snap.scanning) setScanState("扫描中…", true);
 
     // 页面在训练模块初始化完成后才打开时，也补弹部署面板
-    if (snap.ui_ready && !state.choiceShown &&
-        ["ready", "training", "done"].includes(snap.status)) {
-      state.choiceShown = true;
-      openModal("modal-choice");
+    if (snap.ui_ready && ["ready", "training", "done"].includes(snap.status)) {
+      showChoiceOnce();
     }
+  }
+
+  // 部署方式选择面板只在“第一次就绪”时弹出；刷新后不再骚扰
+  function showChoiceOnce() {
+    if (state.choiceShown) return;
+    state.choiceShown = true;
+    writeStore(STORE.choice, true);
+    openModal("modal-choice");
   }
 
   function setStatus(status) {
@@ -666,12 +755,15 @@
     const last = state.rounds[state.rounds.length - 1];
     const done = last ? last.round : 0;
     const total = state.train.rounds_total || 0;
+    const progress = `训练中 ${done}${total ? ` / ${total}` : ""} 轮`;
     setText("#train-state-text",
-      running ? `训练中 ${done}${total ? ` / ${total}` : ""} 轮` : "未运行");
-    for (const id of ["#btn-start"]) {
-      const btn = $(id);
-      if (btn) btn.disabled = running;
-    }
+      running ? progress : (done ? `已结束：${done} 轮` : "未运行"));
+    setText("#action-state",
+      running ? progress : (STATUS_TEXT[state.status] || "就绪"));
+    const start = $("#btn-start");
+    const ready = state.uiReady &&
+      ["ready", "training", "done", "stopped", "error"].includes(state.status);
+    if (start) start.disabled = running || !ready;
     for (const id of ["#btn-stop", "#btn-stop-2"]) {
       const btn = $(id);
       if (btn) btn.disabled = !running;
@@ -685,6 +777,7 @@
       switchView("train");
       return;
     }
+    saveFormDraft();
     const spec = currentSpec();
     if (spec) form.dataset = spec;
     try {
@@ -712,21 +805,77 @@
     }
   }
 
-  async function pickModelPath() {
+  let pickTimer = null;
+
+  function setPickPending(pending) {
+    state.pickPending = pending;
     const btn = $("#btn-pick-path");
-    if (btn) btn.disabled = true;
+    if (btn) {
+      btn.disabled = pending;
+      btn.textContent = pending ? "等待对话框…" : "浏览…";
+    }
+    if (pickTimer) {
+      clearTimeout(pickTimer);
+      pickTimer = null;
+    }
+    if (pending) {
+      // 兜底：对话框卡住时不让按钮永远转圈
+      pickTimer = setTimeout(() => {
+        setPickPending(false);
+        addInfo("WARN", "系统对话框长时间无响应：请查看引擎主机任务栏，或直接输入路径");
+      }, 180000);
+    }
+  }
+
+  function applyPickState(pick) {
+    if (!pick) return;
+    if (pick.status === "pending") {
+      setPickPending(true);
+    } else {
+      setPickPending(false);
+      if (pick.status === "ok" && pick.path) {
+        $("#model-path").value = pick.path;
+        state.settings.model_path = pick.path;
+      }
+    }
+  }
+
+  function onModelPathEvent(ev) {
+    if (ev.status === "pending") {
+      setPickPending(true);
+      return;
+    }
+    setPickPending(false);
+    if (ev.status === "ok" && ev.path) {
+      $("#model-path").value = ev.path;
+      state.settings.model_path = ev.path;
+      saveFormDraft();
+    } else if (ev.status === "cancelled") {
+      $("#model-path")?.focus();
+    } else {
+      $("#model-path")?.focus();
+    }
+    // 具体提示由后端 emit_info 统一输出，避免前端重复一条
+  }
+
+  async function pickModelPath() {
+    if (state.pickPending) return;
+    setPickPending(true);
     try {
       const res = await post({ cmd: "pick_model_path",
                                current: $("#model-path").value.trim() });
-      if (res.path) {
-        $("#model-path").value = res.path;
-        state.settings.model_path = res.path;
-        addInfo("UI", `已选择模型保存位置：${res.path}`, false);
+      if (res.ok === false || res.status === "busy" ||
+          res.status === "unavailable" || res.status === "error") {
+        setPickPending(false);
+        addInfo("WARN", res.detail || res.error ||
+          "无法打开系统对话框，请直接输入路径");
+        $("#model-path")?.focus();
       }
+      // status === "pending"：结果稍后通过 model_path 事件回传
     } catch (err) {
+      setPickPending(false);
       addInfo("WARN", `无法打开文件对话框：${err.message}（可直接输入路径）`);
-    } finally {
-      if (btn) btn.disabled = false;
+      $("#model-path")?.focus();
     }
   }
 
@@ -748,16 +897,73 @@
     }
   }
 
+  const FORM_FIELDS = {
+    dataset: "#dataset-select",
+    model_path: "#model-path",
+    rounds: "#p-rounds",
+    k_steps: "#p-ksteps",
+    batch: "#p-batch",
+    lr: "#p-lr",
+    min_workers: "#p-workers",
+  };
+
+  function markPreset(name) {
+    $$(".preset").forEach((b) =>
+      b.classList.toggle("active", b.dataset.preset === name)
+    );
+  }
+
+  function saveFormDraft() {
+    const draft = {};
+    for (const [key, sel] of Object.entries(FORM_FIELDS)) {
+      const el = $(sel);
+      if (el) draft[key] = el.value;
+    }
+    writeStore(STORE.form, draft);
+  }
+
+  /* 刷新后恢复标签页自己的输入草稿；训练数据由后端快照恢复。
+     快照重连也会覆盖表单，所以 hydrate 里同样要再套一次草稿。 */
+  function restoreFormDraft() {
+    const draft = readStore(STORE.form, null);
+    if (draft && typeof draft === "object") {
+      for (const [key, sel] of Object.entries(FORM_FIELDS)) {
+        const el = $(sel);
+        if (el && typeof draft[key] === "string" && draft[key] !== "") {
+          el.value = draft[key];
+        }
+      }
+      const select = $("#dataset-select");
+      if (select && !Array.from(select.options).some((o) => o.value === select.value)) {
+        select.selectedIndex = 0;
+      }
+      renderDatasetDetail();
+      renderEstimate();
+    }
+    const preset = readStore(STORE.preset, "");
+    if (preset && PRESETS[preset]) {
+      state.preset = preset;
+      markPreset(preset);
+    }
+  }
+
+  function restoreUiState() {
+    restoreFormDraft();
+    const view = readStore(STORE.view, "dashboard");
+    const known = ["dashboard", "train", "cluster", "deploy", "agent", "logs"];
+    switchView(known.includes(view) ? view : "dashboard");
+  }
+
   function applyPreset(name) {
     const preset = PRESETS[name];
     if (!preset) return;
     state.preset = name;
+    writeStore(STORE.preset, name);
     $("#p-rounds").value = preset.rounds;
     $("#p-ksteps").value = preset.k_steps;
     $("#p-batch").value = preset.batch;
-    $$(".preset").forEach((b) =>
-      b.classList.toggle("active", b.dataset.preset === name)
-    );
+    markPreset(name);
+    saveFormDraft();
     renderEstimate();
   }
 
@@ -826,10 +1032,7 @@
     state.branch = ev.branch || state.branch;
     state.token = ev.token || state.token;
     setText("#meta-master", state.masterHost || "—");
-    if (!state.choiceShown) {
-      state.choiceShown = true;
-      openModal("modal-choice");
-    }
+    showChoiceOnce();
   }
 
   function setScanState(text, busy = false) {
@@ -841,9 +1044,13 @@
     }
   }
 
+  const OS_LABELS = { windows: "Windows", linux: "Linux / Unix", macos: "macOS" };
+
   function onScanEvent(ev) {
     if (ev.phase === "start") {
       state.selected.clear();
+      state.devices = new Map();
+      renderDevices();
       setScanState("扫描中…", true);
       setText("#device-summary", "");
       return;
@@ -854,83 +1061,161 @@
       return;
     }
     if (ev.phase === "done") {
+      const devices = ev.devices || [];
       state.devices = new Map();
-      (ev.devices || []).forEach((d) => state.devices.set(d.ip, d));
+      state.selected.clear();
+      devices.forEach((d) => state.devices.set(d.ip, d));
       renderDevices();
-      const ready = (ev.devices || []).filter((d) => d.deployable).length;
-      setText("#device-summary", `${state.devices.size} 台在线 · ${ready} 台可自动部署`);
+      const candidates = devices.filter((d) => d.candidate).length;
+      const ready = devices.filter((d) => d.deployable).length;
+      setText("#device-summary",
+        `${candidates} 台候选 · ${ready} 台可自动部署 · ` +
+        `${devices.length - candidates} 台非目标已折叠`);
       setScanState("扫描完成");
-      return;
     }
     if (ev.phase === "error") {
       setScanState(`扫描失败：${ev.text || ""}`);
     }
   }
 
+  function allDevices() {
+    return Array.from(state.devices.values()).sort((a, b) =>
+      a.ip.localeCompare(b.ip, undefined, { numeric: true })
+    );
+  }
+
+  function deviceSearchText(d) {
+    return [d.name, d.hostname, d.netbios, d.ip, d.mac, d.vendor, d.type, d.os]
+      .filter(Boolean).join(" ").toLowerCase();
+  }
+
+  function visibleDevices() {
+    const q = state.query.trim().toLowerCase();
+    return allDevices().filter((d) => {
+      if (!state.showAll && !d.candidate) return false;
+      return !q || deviceSearchText(d).includes(q);
+    });
+  }
+
+  function syncCheckAll(list) {
+    const box = $("#check-all");
+    if (!box) return;
+    const targets = (list || visibleDevices()).filter((d) => d.deployable);
+    const selected = targets.filter((d) => state.selected.has(d.ip)).length;
+    box.disabled = targets.length === 0;
+    box.checked = targets.length > 0 && selected === targets.length;
+    box.indeterminate = selected > 0 && selected < targets.length;
+  }
+
+  function deviceRow(d) {
+    const tr = document.createElement("tr");
+    tr.className = d.candidate ? "device-row" : "device-row not-target";
+
+    const checkCell = document.createElement("td");
+    checkCell.className = "col-check";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.disabled = !d.deployable;
+    cb.checked = state.selected.has(d.ip);
+    cb.title = d.deployable
+      ? "选择该设备以自动部署"
+      : "该设备不支持 SSH 自动部署，可下载手动脚本";
+    cb.addEventListener("change", () => {
+      if (cb.checked) state.selected.add(d.ip);
+      else state.selected.delete(d.ip);
+      syncCheckAll(visibleDevices());
+    });
+    checkCell.appendChild(cb);
+
+    const nameCell = document.createElement("td");
+    nameCell.className = "device-name";
+    const main = document.createElement("span");
+    main.className = "device-main";
+    main.textContent = d.name || "未命名设备";
+    if (d.mahe) {
+      const tag = document.createElement("span");
+      tag.className = "device-tag";
+      tag.textContent = "MAHE";
+      main.appendChild(tag);
+    }
+    const sub = document.createElement("span");
+    sub.className = "device-sub";
+    const bits = [d.vendor, OS_LABELS[d.os],
+                  d.candidate ? "" : "非训练目标"].filter(Boolean);
+    sub.textContent = bits.length ? bits.join(" · ") : "厂商未知";
+    nameCell.append(main, sub);
+    nameCell.title = d.reason || d.note || "";
+
+    const ipCell = document.createElement("td");
+    ipCell.className = "device-ip";
+    ipCell.textContent = d.ip;
+    const mac = document.createElement("span");
+    mac.className = "device-mac";
+    mac.textContent = d.mac || "MAC 未知";
+    ipCell.appendChild(mac);
+
+    const typeCell = document.createElement("td");
+    const typeBadge = document.createElement("span");
+    typeBadge.className = "badge";
+    typeBadge.textContent = d.type || "未知设备";
+    typeCell.appendChild(typeBadge);
+
+    const portsCell = document.createElement("td");
+    portsCell.className = "ports";
+    portsCell.textContent = (d.ports || []).length ? d.ports.join(", ") : "—";
+
+    const condCell = document.createElement("td");
+    const cond = document.createElement("span");
+    let cls = "warn";
+    let label = "需手动部署";
+    if (d.mahe) {
+      cls = "ok";
+      label = "已运行 MAHE";
+    } else if (d.deployable) {
+      cls = "ok";
+      label = "可自动部署（SSH）";
+    } else if (d.channel === "winrm") {
+      label = "需手动（WinRM）";
+    } else if (!["computer", "nas"].includes(d.kind)) {
+      label = "非训练目标";
+    }
+    cond.className = `badge ${cls}`;
+    cond.textContent = label;
+    cond.title = d.note || "";
+    condCell.appendChild(cond);
+
+    tr.append(checkCell, nameCell, ipCell, typeCell, portsCell, condCell);
+    return tr;
+  }
+
   function renderDevices() {
     const body = $("#device-body");
     if (!body) return;
     body.innerHTML = "";
-    const devices = Array.from(state.devices.values()).sort((a, b) =>
-      a.ip.localeCompare(b.ip, undefined, { numeric: true })
-    );
-    if (!devices.length) {
+    const all = allDevices();
+    const list = visibleDevices();
+    const candidates = all.filter((d) => d.candidate).length;
+    const ready = all.filter((d) => d.deployable).length;
+    setText("#device-summary", all.length
+      ? `${candidates} 台候选 · ${ready} 台可自动部署 · ` +
+        `${all.length - candidates} 台非目标已折叠`
+      : "");
+    setText("#filter-count", all.length ? `显示 ${list.length} / ${all.length} 台` : "");
+
+    if (!list.length) {
       const tr = document.createElement("tr");
       const td = document.createElement("td");
       td.colSpan = 6;
       td.className = "empty";
-      td.textContent = "暂无设备：点击“扫描”开始发现局域网主机";
+      td.textContent = all.length
+        ? "当前筛选没有匹配设备。"
+        : "暂无设备：点击“扫描”发现局域网主机；默认只显示可部署的候选设备。";
       tr.appendChild(td);
       body.appendChild(tr);
-      return;
+    } else {
+      for (const d of list) body.appendChild(deviceRow(d));
     }
-
-    for (const d of devices) {
-      const tr = document.createElement("tr");
-
-      const checkCell = document.createElement("td");
-      const cb = document.createElement("input");
-      cb.type = "checkbox";
-      cb.disabled = !d.deployable;
-      cb.checked = state.selected.has(d.ip);
-      cb.addEventListener("change", () => {
-        if (cb.checked) state.selected.add(d.ip);
-        else state.selected.delete(d.ip);
-      });
-      checkCell.appendChild(cb);
-
-      const nameCell = document.createElement("td");
-      nameCell.className = "device-name";
-      nameCell.textContent = d.name || "未命名设备";
-      nameCell.title = d.note || "";
-
-      const ipCell = document.createElement("td");
-      ipCell.className = "device-ip";
-      ipCell.textContent = d.ip;
-
-      const typeCell = document.createElement("td");
-      const typeBadge = document.createElement("span");
-      typeBadge.className = "badge";
-      typeBadge.textContent = d.type || "未知设备";
-      typeCell.appendChild(typeBadge);
-
-      const portsCell = document.createElement("td");
-      portsCell.className = "ports";
-      portsCell.textContent = (d.ports || []).length ? d.ports.join(", ") : "—";
-
-      const condCell = document.createElement("td");
-      const cond = document.createElement("span");
-      cond.className = `badge ${d.deployable ? "ok" : "warn"}`;
-      cond.textContent = d.deployable
-        ? `可自动部署（${d.channel}）`
-        : d.channel === "winrm"
-          ? "需手动（WinRM）"
-          : "需手动";
-      condCell.appendChild(cond);
-
-      tr.append(checkCell, nameCell, ipCell, typeCell, portsCell, condCell);
-      body.appendChild(tr);
-    }
+    syncCheckAll(list);
   }
 
   async function startScan() {
@@ -1045,6 +1330,8 @@
 
   // ---------------- 视图 / 弹窗 ----------------
   function switchView(name) {
+    state.view = name;
+    writeStore(STORE.view, name);
     $$(".view").forEach((v) =>
       v.classList.toggle("hidden", v.id !== `view-${name}`)
     );
@@ -1053,6 +1340,7 @@
     );
     if (name === "dashboard") drawChart();
     if (name === "train") renderEstimate();
+    if (name === "deploy") renderDevices();
   }
 
   function openModal(id) {
@@ -1103,12 +1391,49 @@
     $("#dataset-select").addEventListener("change", () => {
       renderDatasetDetail();
       renderEstimate();
+      saveFormDraft();
     });
     $$(".preset").forEach((btn) =>
       btn.addEventListener("click", () => applyPreset(btn.dataset.preset))
     );
     for (const sel of ["#p-rounds", "#p-ksteps", "#p-batch", "#p-lr", "#p-workers"]) {
-      $(sel).addEventListener("input", renderEstimate);
+      $(sel).addEventListener("input", () => {
+        renderEstimate();
+        saveFormDraft();
+      });
+    }
+    for (const id of ["#model-path"]) {
+      const el = $(id);
+      if (el) {
+        el.addEventListener("input", saveFormDraft);
+        el.addEventListener("change", saveFormDraft);
+      }
+    }
+
+    const showAll = $("#show-all");
+    if (showAll) {
+      showAll.addEventListener("change", () => {
+        state.showAll = showAll.checked;
+        renderDevices();
+      });
+    }
+    const search = $("#device-search");
+    if (search) {
+      search.addEventListener("input", () => {
+        state.query = search.value || "";
+        renderDevices();
+      });
+    }
+    const checkAll = $("#check-all");
+    if (checkAll) {
+      checkAll.addEventListener("change", () => {
+        for (const d of visibleDevices()) {
+          if (!d.deployable) continue;
+          if (checkAll.checked) state.selected.add(d.ip);
+          else state.selected.delete(d.ip);
+        }
+        renderDevices();
+      });
     }
 
     $("#btn-agent").addEventListener("click", sendAgent);
@@ -1137,11 +1462,6 @@
 
   // ---------------- 启动 ----------------
   document.addEventListener("DOMContentLoaded", () => {
-    bind();
-    connect();
-    renderNodes();
-    renderDevices();
-    renderTrainState();
-    runBoot();
+    boot();
   });
 })();

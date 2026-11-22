@@ -185,6 +185,7 @@ def run_master(args, spawn_workers: bool = False,
     runtime: dict = {"core": None, "master": None, "workers": [],
                      "train_thread": None}
     stop_evt = threading.Event()
+    pick_lock = threading.Lock()
 
     handler = _UiLogHandler(web.emit_info)
     logging.getLogger("mahe").addHandler(handler)
@@ -391,15 +392,51 @@ def run_master(args, spawn_workers: bool = False,
         ids = master.clear_nodes()
         web.emit_info("NODE", f"已清空 {len(ids)} 个节点")
 
-    def do_pick_path(cmd: dict) -> str:
+    def do_pick_path(cmd: dict) -> dict:
+        """异步打开原生对话框：先快速返回 pending，结果通过 SSE 事件回传。
+
+        这样浏览器不会因为对话框一直开着而看起来“点了没反应”，也能在用户取消或
+        环境不支持时给出明确提示。
+        """
         current = str(cmd.get("current") or
                       web.state.settings.get("model_path") or "")
-        path = platform_dialogs.pick_save_file(current)
-        if path:
-            settings = web.state.set_settings({"model_path": path})
-            web.publish({"type": "settings", "settings": settings})
-            web.emit_info("UI", f"模型保存位置：{path}")
-        return path
+        if not pick_lock.acquire(blocking=False):
+            return {"status": "busy", "detail": "已有一个文件对话框等待操作"}
+
+        def worker() -> None:
+            try:
+                web.publish_model_path("pending", "", "等待系统对话框…")
+                web.emit_info(
+                    "UI", "已在引擎主机弹出系统文件对话框（若没看到请查看任务栏）")
+                result = platform_dialogs.pick_save_file_result(current)
+                if result.status == "ok" and result.path:
+                    settings = web.state.set_settings(
+                        {"model_path": result.path})
+                    web.publish({"type": "settings", "settings": settings})
+                    web.emit_info("UI", f"模型保存位置：{result.path}")
+                elif result.status == "cancelled":
+                    web.emit_info("UI", "已取消选择，可直接在输入框手填路径")
+                else:
+                    web.emit_info(
+                        "WARN",
+                        f"无法打开系统对话框：{result.detail or result.status}；"
+                        "可直接在输入框手填路径",
+                    )
+                web.publish_model_path(result.status, result.path, result.detail)
+            except Exception as exc:  # 对话框失败不影响训练进程
+                log.exception("文件对话框异常")
+                web.emit_info("ERROR", f"文件对话框异常：{exc}")
+                web.publish_model_path("error", "", str(exc))
+            finally:
+                pick_lock.release()
+
+        try:
+            threading.Thread(target=worker, daemon=True,
+                             name="mahe-pick").start()
+        except Exception:
+            pick_lock.release()
+            raise
+        return {"status": "pending"}
 
     def do_agent_ask(cmd: dict) -> dict:
         try:
