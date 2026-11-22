@@ -6,11 +6,18 @@
 // AArch64 调用约定：x0/dst, x1/src, x2/n, s0/lr
 // NEON 在 aarch64 是基础特性，无条件可用。
 
+// Mach-O（macOS/iOS）的 C 符号带前导下划线，ELF 不带；.S 会先过 C 预处理器
+#ifdef __APPLE__
+#define MAHE_SYM(x) _##x
+#else
+#define MAHE_SYM(x) x
+#endif
+
 .text
 
 .align 4
-.global mahe_reduce_add_f32_neon
-mahe_reduce_add_f32_neon:
+.global MAHE_SYM(mahe_reduce_add_f32_neon)
+MAHE_SYM(mahe_reduce_add_f32_neon):
     mov     x3, x2
     lsr     x3, x3, #4              // 每轮 16 个 float（4 个 q 寄存器）
     cbz     x3, .Ltail8
@@ -42,10 +49,10 @@ mahe_reduce_add_f32_neon:
     ret
 
 .align 4
-.global mahe_sgd_update_f32_neon
+.global MAHE_SYM(mahe_sgd_update_f32_neon)
 // param[i] -= lr * grad[i]
 // 用 fmla：把 lr 取负广播到 v4，param += (-lr)*grad
-mahe_sgd_update_f32_neon:
+MAHE_SYM(mahe_sgd_update_f32_neon):
     fmov    w9, s0                  // 保存 lr 的位模式（x9 是调用者保存寄存器）
     dup     v4.4s, v0.s[0]          // 广播 lr（s0 是 v0 的低 lane）
     fneg    v4.4s, v4.4s            // -lr
