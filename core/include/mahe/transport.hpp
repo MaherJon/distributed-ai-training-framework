@@ -63,12 +63,18 @@ private:
   void read_loop_impl(const MessageHandler& on_msg);
   void read_loop_with_handlers(MessageHandler on_msg, CloseHandler on_close);
   void write_loop();
+  void close_fd();
+  // 自线程 detach、其他线程 join；必须在 std::thread 成员析构前完成
+  void join_threads();
 
   sock::socket_t fd_;
   std::string peer_;
   std::atomic<bool> open_{false};
   std::atomic<bool> closing_{false};
   std::atomic<bool> fd_closed_{false};
+  // close() 只允许一个线程执行 join/detach：读线程与写线程可能同时走到关闭路径，
+  // 否则会对已被 detach 的线程再次 join（pthread_join → EINVAL）
+  std::atomic<bool> close_started_{false};
 
   std::thread reader_;
   std::thread writer_;
